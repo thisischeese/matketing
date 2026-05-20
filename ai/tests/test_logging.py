@@ -72,6 +72,16 @@ class StubDraftUploader:
 
 
 class StubFrameExtractor:
+    last_profile = {
+        "extract_profile_decode_wait_ms": 11,
+        "extract_profile_normalize_ms": 22,
+        "extract_profile_inference_ms": 33,
+        "extract_profile_candidate_collect_ms": 4,
+        "extract_profile_segment_select_ms": 5,
+        "extract_profile_batches": 1,
+        "extract_profile_sampled_frames": 3,
+    }
+
     def extract_top_k_frames(self, video_path: Path, k: int):
         return [
             (np.zeros((8, 8, 3), dtype=np.uint8), float(5 - index))
@@ -222,6 +232,13 @@ async def test_frame_extraction_emits_stage_logs(tmp_path: Path) -> None:
     assert 'frame_score="5.000000"' in output
     assert 'frame_score="4.000000"' in output
     assert 'frame_score="3.000000"' in output
+    assert "extract_profile_decode_wait_ms=11" in output
+    assert "extract_profile_normalize_ms=22" in output
+    assert "extract_profile_inference_ms=33" in output
+    assert "extract_profile_candidate_collect_ms=4" in output
+    assert "extract_profile_segment_select_ms=5" in output
+    assert "extract_profile_batches=1" in output
+    assert "extract_profile_sampled_frames=3" in output
     assert output.count('event="frame_extraction.upload_frame.started"') == 3
     assert output.count('event="frame_extraction.upload_frame.completed"') == 3
     assert 'frame_shape="8x8x3"' in output

@@ -386,6 +386,9 @@ class FrameExtractionService:
             video_path,
             DRAFT_TOP_K,
         )
+        extractor_profile = getattr(self.extractor, "last_profile", {}) or {}
+        for key, value in extractor_profile.items():
+            debug_fields[f"debug:{key}"] = str(value)
         if not extracted:
             debug_fields["debug:extractor_result"] = "none"
             logger.warning(
@@ -405,6 +408,7 @@ class FrameExtractionService:
                         for key, value in OpenCVVideo.last_scan_metadata.items()
                         if value is not None
                     },
+                    **extractor_profile,
                     elapsed_ms=int((time.perf_counter() - extract_started_at) * 1000),
                 ),
             )
@@ -428,6 +432,7 @@ class FrameExtractionService:
                     for key, value in OpenCVVideo.last_scan_metadata.items()
                     if value is not None
                 },
+                **extractor_profile,
                 elapsed_ms=int((time.perf_counter() - extract_started_at) * 1000),
             ),
         )
