@@ -80,11 +80,6 @@ _MENU_PROMOTION_PROMPT_TEMPLATE = """당신은 50-60대 자영업자의 메뉴 �
 - menu_name: {menu_name}
 - menu_description: {menu_description}
 
-예시:
-{{
-    "guided_text" : "바삭한 에그타르트의 결이 자연스럽게 드러나도록 촬영해보세요.",
-    "caption" : "직접 끓여낸 바닐라빈의 깊은 향을 담아 만든 에그타르트. 한 입 베어 물면 바삭한 파이지 사이로 부드러운 커스터드가 천천히 퍼집니다. 오늘도 마음에 잠깐의 휴식을 #에그타르트 #비오는날"
-}}
 """
 
 _PRIMARY_WEATHER_TAG_PRIORITY = (

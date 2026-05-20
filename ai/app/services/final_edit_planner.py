@@ -364,21 +364,24 @@ Example output:
 """.strip()
 
 
-def build_final_edit_prompt(
-    context: FinalEditSessionContext,
-    image_count: int,
-) -> str:
-    keywords_text = ", ".join(context.keywords) if context.keywords else "(none)"
-    caption_text = context.caption or "(none)"
+def build_final_edit_system_prompt() -> str:
     return (
-        "You are a photo filter selection planner for draft images.\n\n"
+        "You are a photo filter selection planner for draft images.\n"
+        "Return only a JSON array.\n"
+        'The only allowed tool is "filter".\n'
+        'For every image, tools must be exactly ["filter"].\n'
+        'params.filter must be exactly {"filter_name": "<catalog filter name>"}.\n'
+        "filter_name must match a catalog name exactly.\n"
+        "Do not output any numeric editing parameters such as contrast, saturation, highlights, shadows, vibrance, temperature, brightness, crop boxes, sharpen strength, or blur radius."
+    )
+
+
+def build_final_edit_static_prefix() -> str:
+    return (
         f"{_filter_catalog_text()}\n\n"
-        f"{_target_preset_text(context)}\n"
-        f"[caption] {caption_text}\n"
-        f"[keywords] {keywords_text}\n\n"
         "[instructions]\n"
-        f"1. You must create an edit plan for all {image_count} input images.\n"
-        f"2. The JSON array must include every image_index from 0 to {image_count - 1} exactly once.\n"
+        "1. You must create an edit plan for all 1 input images.\n"
+        "2. The JSON array must include every image_index from 0 to 0 exactly once.\n"
         "3. Analyze each image's main subject and the mood implied by the caption and keywords.\n"
         "4. Select exactly one filter from the filter catalog for each image.\n"
         "5. The only allowed tool is filter.\n"
@@ -390,6 +393,52 @@ def build_final_edit_prompt(
         "11. Output only a JSON array.\n\n"
         f"{_few_shot_example()}"
     )
+
+
+def build_final_edit_dynamic_suffix(context: FinalEditSessionContext) -> str:
+    keywords_text = ", ".join(context.keywords) if context.keywords else "(none)"
+    caption_text = context.caption or "(none)"
+    return (
+        f"{_target_preset_text(context)}\n"
+        f"[caption] {caption_text}\n"
+        f"[keywords] {keywords_text}"
+    )
+
+
+def build_final_edit_prompt(
+    context: FinalEditSessionContext,
+    image_count: int,
+) -> str:
+    _ = image_count
+    return (
+        f"{build_final_edit_system_prompt()}\n\n"
+        f"{build_final_edit_static_prefix()}\n\n"
+        f"{build_final_edit_dynamic_suffix(context)}"
+    )
+
+
+def build_final_edit_messages(
+    context: FinalEditSessionContext,
+    image_paths: list[str],
+) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": build_final_edit_static_prefix(),
+        },
+        {
+            "type": "text",
+            "text": build_final_edit_dynamic_suffix(context),
+        },
+    ]
+    content.extend(
+        {"type": "image_url", "image_url": {"url": image_path_to_data_uri(path)}}
+        for path in image_paths
+    )
+    return [
+        {"role": "system", "content": build_final_edit_system_prompt()},
+        {"role": "user", "content": content},
+    ]
 
 
 def image_path_to_data_uri(image_path: str) -> str:
@@ -558,19 +607,9 @@ class FinalEditPlannerClient:
         image_paths: list[str],
         context: FinalEditSessionContext,
     ) -> str:
-        content = [
-            {"type": "image_url", "image_url": {"url": image_path_to_data_uri(path)}}
-            for path in image_paths
-        ]
-        content.append(
-            {
-                "type": "text",
-                "text": build_final_edit_prompt(context, len(image_paths)),
-            }
-        )
         payload = {
             "model": self.model_name,
-            "messages": [{"role": "user", "content": content}],
+            "messages": build_final_edit_messages(context, image_paths),
             "temperature": self.model_settings.temperature,
             "top_p": self.model_settings.top_p,
             "max_tokens": self.model_settings.max_tokens,

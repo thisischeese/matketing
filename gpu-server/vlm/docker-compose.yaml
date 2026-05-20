@@ -1,0 +1,52 @@
+name: marketing-gpu-vlm
+
+services:
+  vlm-server:
+    image: vllm/vllm-openai:latest
+    container_name: vlm-server
+    ports:
+      - "${VLM_PORT:-8001}:8000"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+    command: >
+      ${VLM_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct-AWQ}
+      --max-model-len ${VLM_CTX:-8192}
+      --gpu-memory-utilization ${VLM_GPU_MEM:-0.75}
+      --enable-prefix-caching
+      --host 0.0.0.0
+      --port 8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  huggingface-cache:
+  redis-data:
