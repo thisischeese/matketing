@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     FINAL_EDIT_MODEL_TEMPERATURE: float = 0.2
     FINAL_EDIT_MODEL_TOP_P: float = 0.9
     FINAL_EDIT_MODEL_TIMEOUT_SECONDS: float = DEFAULT_FINAL_EDIT_MODEL_TIMEOUT_SECONDS
-    FINAL_EDIT_MODEL_NAME: str = "Qwen/Qwen2.5-VL-3B-Instruct-AWQ"
+    FINAL_EDIT_MODEL_NAME: str = "Qwen/Qwen2.5-VL-7B-Instruct-AWQ"
     FINAL_EDIT_MODEL_ENABLED: bool = True
     FINAL_EDIT_ENABLE_UPSCALE: bool = False
 
