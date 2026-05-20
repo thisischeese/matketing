@@ -44,6 +44,9 @@ Thumbs.db
 ######################################################################
 .env
 .env.*
+gpu-server/env/*.env
+gpu-server/exaone/.env
+gpu-server/vlm/.env
 
 # Spring Boot
 application-local.yml
