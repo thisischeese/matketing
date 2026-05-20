@@ -474,3 +474,14 @@ ALTER TABLE notifications
                   WHEN '3' THEN 'FAILED'
                   ELSE status::text
         END;
+
+ALTER TABLE account_weekly_metrics
+    ADD COLUMN IF NOT EXISTS weekly_revenue NUMERIC(15,2) NULL,
+    ADD COLUMN IF NOT EXISTS revenue_growth_rate NUMERIC(5,2) NULL,
+    ADD COLUMN IF NOT EXISTS ai_strategy_suggestion TEXT NULL,
+    ADD COLUMN IF NOT EXISTS is_strategy_executed BOOLEAN NOT NULL DEFAULT FALSE;
+
+COMMENT ON COLUMN account_weekly_metrics.weekly_revenue IS '주간 매출';
+COMMENT ON COLUMN account_weekly_metrics.revenue_growth_rate IS '매출 증가율';
+COMMENT ON COLUMN account_weekly_metrics.ai_strategy_suggestion IS 'AI 전략 제안 내용';
+COMMENT ON COLUMN account_weekly_metrics.is_strategy_executed IS '전략 실행 여부';

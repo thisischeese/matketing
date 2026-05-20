@@ -581,6 +581,11 @@ PY
                         BUILD_SERVICES="$(cat .build-services 2>/dev/null || true)"
                         export BUILD_COMMIT="${GIT_COMMIT:-unknown}"
 
+                        if [ "${JOB_BASE_NAME:-${JOB_NAME:-}}" = "master-deploy" ]; then
+                            echo "master-deploy detected. Force build all service."
+                            BUILD_SERVICES="spring frontend nginx fastapi crawler"
+                        fi
+
                         append_service() {
                           services="$1"
                           service="$2"
@@ -608,7 +613,12 @@ PY
 
                         if [ -n "$BUILD_SERVICES" ]; then
                           # 변경된 도메인의 이미지만 다시 빌드한다. BUILD_COMMIT은 이미지 라벨로 남아 배포 커밋 추적에 사용된다.
-                          docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file .env build $BUILD_SERVICES
+                          # master-deploy 잡이 실행되면 강제로 이미지를 재빌드한다.
+                          if [ "${JOB_BASE_NAME:-${JOB_NAME:-}}" = "master-deploy" ]; then
+                            docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file .env build --no-cache $BUILD_SERVICES
+                          else
+                            docker compose -p "${PROJECT_NAME}" -f "${COMPOSE_FILE}" --env-file .env build $BUILD_SERVICES
+                          fi
 
                           # 애플리케이션 컨테이너 교체 전에 공용 인프라 컨테이너를 먼저 보장한다.
                           # Model servers moved to separate EC2 instances; removed from up: keyword-server caption-server
