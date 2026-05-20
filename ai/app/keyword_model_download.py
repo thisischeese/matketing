@@ -6,11 +6,15 @@ import logging
 import shutil
 from pathlib import Path
 
-from app.core.config import (
-    DEFAULT_KEYWORD_MODEL_HF_FILENAME,
-    DEFAULT_KEYWORD_MODEL_HF_REPO_ID,
-    DEFAULT_KEYWORD_MODEL_PATH,
+DEFAULT_KEYWORD_MODEL_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "models"
+    / "exaone-3.5-7.8b-instruct"
+    / "q4_k_m"
+    / "model.gguf"
 )
+DEFAULT_KEYWORD_MODEL_HF_REPO_ID = "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF"
+DEFAULT_KEYWORD_MODEL_HF_FILENAME = "EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf"
 
 logger = logging.getLogger(__name__)
 

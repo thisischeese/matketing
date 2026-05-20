@@ -3,12 +3,11 @@ from pathlib import Path
 import pytest
 
 from app import keyword_model_download
-from app.core import config
-from app.core.config import (
+from app.keyword_model_download import (
     DEFAULT_KEYWORD_MODEL_HF_FILENAME,
     DEFAULT_KEYWORD_MODEL_HF_REPO_ID,
+    ensure_keyword_model_available,
 )
-from app.keyword_model_download import ensure_keyword_model_available
 
 
 def test_ensure_keyword_model_available_returns_existing_file(tmp_path) -> None:
@@ -66,7 +65,6 @@ def test_ensure_keyword_model_available_uses_default_path_when_not_provided(
         return str(downloaded)
 
     monkeypatch.setattr(keyword_model_download, "_hf_hub_download", fake_hf_hub_download)
-    monkeypatch.setattr(config, "DEFAULT_KEYWORD_MODEL_PATH", default_model_path)
     monkeypatch.setattr(
         keyword_model_download,
         "DEFAULT_KEYWORD_MODEL_PATH",
