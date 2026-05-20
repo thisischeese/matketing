@@ -10,7 +10,11 @@ from app.services.final_edit_planner import (
     FinalEditSessionContext,
     ImageEditPlan,
     build_default_final_edit_plan,
+    build_final_edit_dynamic_suffix,
+    build_final_edit_messages,
     build_final_edit_prompt,
+    build_final_edit_static_prefix,
+    build_final_edit_system_prompt,
     load_final_edit_filter_catalog,
     load_final_edit_session_context,
     normalize_image_edit_plan,
@@ -141,8 +145,8 @@ def test_build_final_edit_prompt_includes_filter_catalog_and_rules() -> None:
     assert "Do not output any numeric editing parameters" in prompt
     assert "Valencia" in prompt
     assert "pilgram2_name" not in prompt
-    assert "all 3 input images" in prompt
-    assert "image_index from 0 to 2" in prompt
+    assert "all 1 input images" in prompt
+    assert "image_index from 0 to 0" in prompt
     assert "color_grading" not in prompt
 
 
@@ -163,6 +167,65 @@ def test_build_final_edit_prompt_keeps_aesthetic_target_profile_context() -> Non
         f"\"target\": {AESTHETIC_TARGET_TONE_PROFILE['brightness']['target']}"
         in prompt
     )
+
+
+def test_build_final_edit_static_prefix_is_stable() -> None:
+    assert build_final_edit_static_prefix() == build_final_edit_static_prefix()
+    assert "[filter catalog]" in build_final_edit_static_prefix()
+    assert "all 1 input images" in build_final_edit_static_prefix()
+    assert "image_index from 0 to 0" in build_final_edit_static_prefix()
+
+
+def test_build_final_edit_dynamic_suffix_contains_only_runtime_context() -> None:
+    suffix = build_final_edit_dynamic_suffix(
+        FinalEditSessionContext(
+            owner_persona="friendly",
+            caption="cozy cake intro",
+            keywords=["dessert", "latte"],
+        )
+    )
+
+    assert "[owner_persona] friendly" in suffix
+    assert "[caption] cozy cake intro" in suffix
+    assert "[keywords] dessert, latte" in suffix
+    assert "[filter catalog]" not in suffix
+    assert "Example output" not in suffix
+
+
+def test_build_final_edit_system_prompt_keeps_strict_rules() -> None:
+    system_prompt = build_final_edit_system_prompt()
+
+    assert "Return only a JSON array." in system_prompt
+    assert 'tools must be exactly ["filter"]' in system_prompt
+    assert "Do not output any numeric editing parameters" in system_prompt
+
+
+def test_build_final_edit_messages_places_fixed_text_before_images() -> None:
+    from app.services import final_edit_planner as planner_module
+
+    original = planner_module.image_path_to_data_uri
+    planner_module.image_path_to_data_uri = lambda path: f"data:image/mock;base64,{path}"
+    try:
+        messages = build_final_edit_messages(
+            FinalEditSessionContext(
+                owner_persona="friendly",
+                caption="cake",
+                keywords=["dessert"],
+            ),
+            ["a.jpg"],
+        )
+    finally:
+        planner_module.image_path_to_data_uri = original
+
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    user_content = messages[1]["content"]
+    assert user_content[0]["type"] == "text"
+    assert "[filter catalog]" in user_content[0]["text"]
+    assert user_content[1]["type"] == "text"
+    assert "[caption] cake" in user_content[1]["text"]
+    assert user_content[2]["type"] == "image_url"
+    assert user_content[2]["image_url"]["url"] == "data:image/mock;base64,a.jpg"
 
 
 def test_resolve_owner_persona_preset_falls_back_to_aesthetic() -> None:
