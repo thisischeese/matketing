@@ -18,15 +18,13 @@ const clearAuthStorage = () => {
 const DEFAULT_ANALYTICS_DATA = {
   reachWeekStart: '',
   reachWeekEnd: '',
-  visitIntentWeekStart: '',
-  visitIntentWeekEnd: '',
-  achievementWeekStart: '',
-  achievementWeekEnd: '',
   weeklyPostAchievementRate: 0,
   targetPostCount: 0,
   achievedPostCount: 0,
   weeklyReachCount: 0,
   weeklyVisitIntentScore: 0,
+  aiStrategySuggestion: null,
+  isStrategyExecuted: false,
 };
 
 export default function MyPage() {
@@ -37,6 +35,7 @@ export default function MyPage() {
   const [analyticsData, setAnalyticsData] = useState(DEFAULT_ANALYTICS_DATA);
   const [isLoading, setIsLoading] = useState(true);
   const [isEditing, setIsEditing] = useState(false);
+  const [isStrategyExecuting, setIsStrategyExecuting] = useState(false);
   const [isEditWarningModalOpen, setIsEditWarningModalOpen] = useState(false);
 
   const fetchMyInfo = async () => {
@@ -69,35 +68,30 @@ export default function MyPage() {
       }
 
       try {
-        const [
-          reachResponse,
-          visitIntentResponse,
-          achievementResponse,
-        ] = await Promise.all([
-          mypageApi.getWeeklyReach(),
-          mypageApi.getWeeklyVisitIntent(),
-          mypageApi.getWeeklyAchievement(),
+        const [lastWeekResponse, thisWeekResponse] = await Promise.all([
+          mypageApi.getLastWeekAnalytics(),
+          mypageApi.getThisWeekAnalytics(),
         ]);
 
         if (!isMounted) return;
 
         setAnalyticsData({
-          reachWeekStart: reachResponse.data.week_start ?? '',
-          reachWeekEnd: reachResponse.data.week_end ?? '',
-          visitIntentWeekStart: visitIntentResponse.data.week_start ?? '',
-          visitIntentWeekEnd: visitIntentResponse.data.week_end ?? '',
-          achievementWeekStart: achievementResponse.data.week_start ?? '',
-          achievementWeekEnd: achievementResponse.data.week_end ?? '',
+          reachWeekStart: lastWeekResponse.data.week_start ?? '',
+          reachWeekEnd: lastWeekResponse.data.week_end ?? '',
           weeklyPostAchievementRate:
-            achievementResponse.data.achievement_rate ?? 0,
+            thisWeekResponse.data.achievement_rate ?? 0,
           targetPostCount:
-            achievementResponse.data.target_post_count ?? 0,
+            thisWeekResponse.data.target_post_count ?? 0,
           achievedPostCount:
-            achievementResponse.data.actual_post_count ?? 0,
+            thisWeekResponse.data.actual_post_count ?? 0,
           weeklyReachCount:
-            reachResponse.data.total_reach ?? 0,
+            lastWeekResponse.data.total_reach ?? 0,
           weeklyVisitIntentScore:
-            visitIntentResponse.data.visit_intent_score ?? 0,
+            lastWeekResponse.data.visit_intent_score ?? 0,
+          aiStrategySuggestion:
+            lastWeekResponse.data.ai_strategy_suggestion ?? null,
+          isStrategyExecuted:
+            thisWeekResponse.data.is_strategy_executed ?? false,
         });
       } catch (error) {
         console.error('마이페이지 통계 조회 실패:', error);
@@ -131,6 +125,26 @@ export default function MyPage() {
 
   const handleCloseEditWarningModal = () => {
     setIsEditWarningModalOpen(false);
+  };
+
+  const handleExecuteStrategy = async () => {
+    if (analyticsData.isStrategyExecuted || isStrategyExecuting) return;
+
+    setIsStrategyExecuting(true);
+
+    try {
+      await mypageApi.executeWeeklyStrategy();
+
+      setAnalyticsData((prev) => ({
+        ...prev,
+        isStrategyExecuted: true,
+      }));
+    } catch (error) {
+      console.error('전략 실행 완료 처리 실패:', error);
+      alert('전략 실행 완료 처리에 실패했습니다. 잠시 후 다시 시도해주세요.');
+    } finally {
+      setIsStrategyExecuting(false);
+    }
   };
 
   const handleLogout = async () => {
@@ -200,15 +214,15 @@ export default function MyPage() {
           <MyPageStatsSection
             reachWeekStart={analyticsData.reachWeekStart}
             reachWeekEnd={analyticsData.reachWeekEnd}
-            visitIntentWeekStart={analyticsData.visitIntentWeekStart}
-            visitIntentWeekEnd={analyticsData.visitIntentWeekEnd}
-            achievementWeekStart={analyticsData.achievementWeekStart}
-            achievementWeekEnd={analyticsData.achievementWeekEnd}
             weeklyPostAchievementRate={analyticsData.weeklyPostAchievementRate}
             targetPostCount={analyticsData.targetPostCount}
             achievedPostCount={analyticsData.achievedPostCount}
             weeklyReachCount={analyticsData.weeklyReachCount}
             weeklyVisitIntentScore={analyticsData.weeklyVisitIntentScore}
+            aiStrategySuggestion={analyticsData.aiStrategySuggestion}
+            isStrategyExecuted={analyticsData.isStrategyExecuted}
+            isStrategyExecuting={isStrategyExecuting}
+            onExecuteStrategy={handleExecuteStrategy}
           />
         )}
 

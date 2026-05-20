@@ -1,10 +1,15 @@
 import { useEffect, useState } from 'react';
 import CardShell from './CardShell';
+import AcornStampTrue from '@/assets/stamp/AcornStampTrue.png';
 
 export default function WeeklyStatCard({
   percent,
   plannedCount,
   achievedCount,
+  aiStrategySuggestion,
+  isStrategyExecuted = false,
+  isStrategyExecuting = false,
+  onExecuteStrategy,
 }) {
   const [animatedPercent, setAnimatedPercent] = useState(0);
 
@@ -56,6 +61,8 @@ export default function WeeklyStatCard({
   const strokeDashoffset =
     circumference - (progressPercent / 100) * circumference;
 
+  const hasStrategy = Boolean(aiStrategySuggestion);
+
   let statusTitle;
   let statusMessage;
 
@@ -89,8 +96,53 @@ export default function WeeklyStatCard({
   }
 
   return (
-    <CardShell className="flex flex-col items-center justify-center py-6">
-      <div className="relative flex h-[190px] w-[190px] items-center justify-center">
+    <CardShell className="flex flex-col items-center justify-center px-5 py-8">
+      <p className="text-[18px] font-extrabold text-primary-100">
+        이번 주 리포트
+      </p>
+
+      <h2 className="mt-2 text-center text-[24px] font-semibold tracking-tight text-accent-100">
+        AI 마케팅 전략
+      </h2>
+
+      <button
+        type="button"
+        onClick={onExecuteStrategy}
+        disabled={!hasStrategy || isStrategyExecuted || isStrategyExecuting}
+        className="mt-8 flex min-h-[110px] items-center justify-center"
+      >
+        {isStrategyExecuted ? (
+          <img
+            src={AcornStampTrue}
+            alt="전략 실행 완료"
+            className="h-[108px] w-[108px] object-contain"
+          />
+        ) : (
+          <div className="h-[108px] w-[108px] rounded-full border-2 border-dashed border-gray-200" />
+        )}
+      </button>
+
+      <p className="mt-3 text-center text-[12px] leading-relaxed text-gray-300">
+        {isStrategyExecuted
+          ? '이번 주 전략을 완료하셨어요'
+          : '실행하면 이번 주 카드에 도장이 찍혀요'}
+        <br />
+        다음 주 월요일에 새로운 전략이 도착해요
+      </p>
+
+      <div className="mt-5 w-full rounded-[18px] bg-surface-100 px-5 py-5 text-center">
+        <p className="whitespace-pre-line text-[17px] font-normal leading-relaxed text-gray-800">
+          {hasStrategy
+            ? aiStrategySuggestion
+            : '아직 추천 전략이 없어요.\n지난주 데이터가 쌓이면 전략을 받아볼 수 있어요.'}
+        </p>
+      </div>
+
+      <h2 className="mt-20 text-center text-[24px] font-semibold tracking-tight text-accent-100">
+        {statusTitle}
+      </h2>
+
+      <div className="relative mt-6 flex h-[190px] w-[190px] items-center justify-center">
         <svg
           width="190"
           height="190"
@@ -129,15 +181,9 @@ export default function WeeklyStatCard({
         </div>
       </div>
 
-      <div className="mt-4 text-center">
-        <h2 className="text-[24px] font-semibold tracking-tight text-accent-100">
-          {statusTitle}
-        </h2>
-
-        <p className="mt-2 text-[17px] font-normal leading-relaxed text-gray-500">
-          {statusMessage}
-        </p>
-      </div>
+      <p className="text-center mt-2 text-[17px] font-normal leading-relaxed text-gray-500">
+        {statusMessage}
+      </p>
     </CardShell>
   );
 }

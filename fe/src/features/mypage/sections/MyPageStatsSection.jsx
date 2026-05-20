@@ -9,6 +9,10 @@ export default function MyPageStatsSection({
   achievedPostCount,
   weeklyReachCount,
   weeklyVisitIntentScore,
+  aiStrategySuggestion,
+  isStrategyExecuted,
+  isStrategyExecuting,
+  onExecuteStrategy,
 }) {
   return (
     <section className="flex flex-col gap-4">
@@ -16,6 +20,10 @@ export default function MyPageStatsSection({
         percent={weeklyPostAchievementRate}
         plannedCount={targetPostCount}
         achievedCount={achievedPostCount}
+        aiStrategySuggestion={aiStrategySuggestion}
+        isStrategyExecuted={isStrategyExecuted}
+        isStrategyExecuting={isStrategyExecuting}
+        onExecuteStrategy={onExecuteStrategy}
       />
 
       <WeeklyInsightCard
@@ -24,7 +32,6 @@ export default function MyPageStatsSection({
         reachCount={weeklyReachCount}
         visitIntentScore={weeklyVisitIntentScore}
       />
-
     </section>
   );
 }
