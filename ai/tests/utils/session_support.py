@@ -401,8 +401,8 @@ class FakePlannerClient:
     def __init__(self, plans: list[ImageEditPlan]) -> None:
         self.plans = plans
         self.last_raw_output = (
-            '[{"image_index":0,"content":"cake","strategy":"denoise",'
-            '"tools":["denoise"],"params":{"denoise":{"strength":0.4}}}]'
+            '[{"image_index":0,"content":"cake","strategy":"warm cafe mood",'
+            '"tools":["filter"],"params":{"filter":{"filter_name":"Clarendon"}}}]'
         )
 
     async def build_plans(self, image_paths, context) -> list[ImageEditPlan]:
@@ -414,8 +414,8 @@ class RecordingPlannerClient:
         self.plans_by_call = plans_by_call
         self.calls: list[list[str]] = []
         self.last_raw_output = (
-            '[{"image_index":0,"content":"cake","strategy":"denoise",'
-            '"tools":["denoise"],"params":{"denoise":{"strength":0.4}}}]'
+            '[{"image_index":0,"content":"cake","strategy":"warm cafe mood",'
+            '"tools":["filter"],"params":{"filter":{"filter_name":"Clarendon"}}}]'
         )
 
     async def build_plans(self, image_paths, context) -> list[ImageEditPlan]:

@@ -11,11 +11,14 @@ from fastapi import Request
 from redis.asyncio import Redis
 
 from app.core.config import LlamaModelClientSettings, settings
+from app.services.final_edit_filter_catalog import (
+    FinalEditFilterCatalogError,
+    load_final_edit_filter_catalog,
+    resolve_final_edit_filter_name,
+)
 from app.services.final_edit_tools import (
     AESTHETIC_TARGET_TONE_PROFILE,
     ToolName,
-    supported_tool_specs,
-    supported_tool_names,
 )
 from app.services.remote_model_client import RemoteModelClient
 from app.services.sessions import session_key
@@ -44,6 +47,8 @@ _FOOD_OR_BEVERAGE_TOKENS = {
     "sandwich",
     "dish",
     "meal",
+    "eggtart",
+    "egg tart",
     "음식",
     "디저트",
     "케이크",
@@ -61,6 +66,8 @@ _FOOD_OR_BEVERAGE_TOKENS = {
     "차",
     "스무디",
     "샌드위치",
+    "에그타르트", 
+    "에그 타르트"
 }
 PERSONA_TARGET_PRESETS: dict[str, dict[str, Any]] = {
     "friendly": {
@@ -105,6 +112,7 @@ TARGET_PROFILE_KIND_PRESET = "style_preset"
 _TOOL_ORDER_GROUPS: dict[ToolName, int] = {
     "crop": -1,
     "denoise": 0,
+    "filter": 1,
     "color_grading": 1,
     "sharpen": 1,
     "background_blur": 1,
@@ -132,36 +140,35 @@ class FinalEditPlanningError(RuntimeError):
     """Raised when the final-edit planner cannot build a usable plan."""
 
 
+def build_noop_final_edit_plan(
+    image_index: int,
+    *,
+    content: str = "draft image",
+    strategy: str = "Planner fallback; keep the original image unchanged.",
+) -> ImageEditPlan:
+    return ImageEditPlan(
+        image_index=image_index,
+        content=content,
+        strategy=strategy,
+        tools=[],
+        params={},
+    )
+
+
 def build_default_final_edit_plan(
     image_index: int,
     *,
     owner_persona: str = DEFAULT_OWNER_PERSONA,
     content: str = "draft image",
-    strategy: str = "Apply minimum color grading for a safe final-edit fallback.",
+    strategy: str = "Planner fallback; keep the original image unchanged.",
     upscale_enabled: bool | None = None,
 ) -> ImageEditPlan:
-    upscale_enabled = settings.FINAL_EDIT_ENABLE_UPSCALE if upscale_enabled is None else upscale_enabled
-    resolved_persona, resolved_target, _used_fallback, target_kind = (
-        resolve_owner_persona_target(owner_persona)
-    )
-    color_grading_params = (
-        {}
-        if target_kind == TARGET_PROFILE_KIND_TONE
-        else dict(resolved_target)
-    )
-    tools: list[ToolName] = ["color_grading"]
-    params: dict[str, dict[str, Any]] = {
-        "color_grading": color_grading_params,
-    }
-    if upscale_enabled:
-        tools.append("upscale")
-        params["upscale"] = {"scale": 2}
-    return ImageEditPlan(
-        image_index=image_index,
+    _ = owner_persona
+    _ = upscale_enabled
+    return build_noop_final_edit_plan(
+        image_index,
         content=content,
         strategy=strategy,
-        tools=tools,
-        params=params,
     )
 
 
@@ -182,7 +189,7 @@ def normalize_image_edit_plan(
         deduplicated_tools.append(tool_name)
         seen_tools.add(tool_name)
 
-    if upscale_enabled and "upscale" not in seen_tools:
+    if deduplicated_tools and upscale_enabled and "upscale" not in seen_tools:
         deduplicated_tools.append("upscale")
         seen_tools.add("upscale")
 
@@ -198,12 +205,12 @@ def normalize_image_edit_plan(
         )
     ]
     if not ordered_tools:
-        return build_default_final_edit_plan(
-            plan.image_index,
-            owner_persona=owner_persona,
+        return ImageEditPlan(
+            image_index=plan.image_index,
             content=plan.content,
             strategy=plan.strategy,
-            upscale_enabled=upscale_enabled,
+            tools=[],
+            params={},
         )
     normalized_params: dict[str, dict[str, Any]] = {}
     for tool_name in ordered_tools:
@@ -311,14 +318,10 @@ async def load_final_edit_session_context(
     )
 
 
-def _tool_catalog_text() -> str:
-    lines = ["[supported tools]"]
-    for index, spec in enumerate(supported_tool_specs(), start=1):
-        lines.append(f"{index}. {spec.name} - {spec.description}")
-        params_text = ", ".join(
-            f"{key}: {value}" for key, value in spec.params_schema.items()
-        )
-        lines.append(f"   params: {{{params_text}}}")
+def _filter_catalog_text() -> str:
+    lines = ["[filter catalog]"]
+    for index, definition in enumerate(load_final_edit_filter_catalog(), start=1):
+        lines.append(f"{index}. {definition.name} - {definition.description}")
     return "\n".join(lines)
 
 
@@ -344,60 +347,18 @@ def _content_focus_hint(context: FinalEditSessionContext) -> str:
 
 
 def _few_shot_example() -> str:
-    if settings.FINAL_EDIT_ENABLE_UPSCALE:
-        return """
-Example output:
-[
-  {
-    "image_index": 0,
-    "content": "A signature cake placed on a bright cafe table.",
-    "strategy": "The cake is the hero subject, so use a tighter close-up crop that keeps the plating natural and removes excess table space first, then denoise, gently lower highlights, mute color, lift shadows only enough to approach the preset, and upscale last.",
-    "tools": ["crop", "denoise", "color_grading", "sharpen", "upscale"],
-    "params": {
-      "crop": {
-        "subject_boxes": [[120, 90, 740, 980]],
-        "keep_edges": ["bottom"]
-      },
-      "denoise": {"strength": 0.5},
-      "color_grading": {
-        "contrast": -10,
-        "highlights": -14,
-        "shadows": 12,
-        "vibrance": -18,
-        "saturation": -12,
-        "temperature": "cool",
-        "tone_curve_shadow_lift": 8
-      },
-      "sharpen": {"strength": 0.35},
-      "upscale": {"scale": 2}
-    }
-  }
-]
-""".strip()
     return """
 Example output:
 [
   {
     "image_index": 0,
-    "content": "A signature cake placed on a bright cafe table.",
-    "strategy": "The cake is the hero subject, so use a tighter close-up crop that keeps the plating natural and removes excess table space first, then denoise, gently lower highlights, mute color, and lift shadows only enough to approach the preset.",
-    "tools": ["crop", "denoise", "color_grading", "sharpen"],
+    "content": "A signature cake and latte on a cozy cafe table.",
+    "strategy": "The cafe table scene and cozy dessert caption feel warm and nostalgic, so Valencia best matches the subject and mood.",
+    "tools": ["filter"],
     "params": {
-      "crop": {
-        "subject_boxes": [[120, 90, 740, 980]],
-        "keep_edges": ["bottom"]
-      },
-      "denoise": {"strength": 0.5},
-      "color_grading": {
-        "contrast": -10,
-        "highlights": -14,
-        "shadows": 12,
-        "vibrance": -18,
-        "saturation": -12,
-        "temperature": "cool",
-        "tone_curve_shadow_lift": 8
-      },
-      "sharpen": {"strength": 0.35}
+      "filter": {
+        "filter_name": "Valencia"
+      }
     }
   }
 ]
@@ -410,38 +371,24 @@ def build_final_edit_prompt(
 ) -> str:
     keywords_text = ", ".join(context.keywords) if context.keywords else "(none)"
     caption_text = context.caption or "(none)"
-    content_focus_hint = _content_focus_hint(context)
     return (
-        "You are a photo editing planner for draft images.\n\n"
-        f"{_tool_catalog_text()}\n\n"
+        "You are a photo filter selection planner for draft images.\n\n"
+        f"{_filter_catalog_text()}\n\n"
         f"{_target_preset_text(context)}\n"
         f"[caption] {caption_text}\n"
         f"[keywords] {keywords_text}\n\n"
-        f"[content_focus_hint] {content_focus_hint}\n\n"
         "[instructions]\n"
         f"1. You must create an edit plan for all {image_count} input images.\n"
         f"2. The JSON array must include every image_index from 0 to {image_count - 1} exactly once.\n"
-        "3. Analyze each image's current style and compare it against the target preset for the owner persona.\n"
-        "4. Use only supported tools.\n"
-        "5. Do not copy the target preset blindly. Estimate the gap between the current image and the target tone, then apply only the minimum adjustment needed for that image.\n"
-        "6. Summarize the gap analysis briefly in strategy.\n"
-        "7. If owner_persona is aesthetic, use the target_preset as a tone profile with target and tolerance values, and reason about the current image's gap from those metrics.\n"
-        "8. Use crop only when it clearly improves Instagram composition. Crop conservatively, preserve the main subject, and skip crop if the gain is weak or risky.\n"
-        "9. If crop is used, provide 1 to 3 subject_boxes as pixel coordinates [[x1,y1,x2,y2], ...]. Use keep_edges only when an edge must remain visible.\n"
-        "10. For portrait images, prefer Instagram-friendly composition near 3:4. Do not force landscape images into portrait crops.\n"
-        "11. If the main subject is food or beverage, prefer an Instagram-friendly hero shot. When the crop gain is clear, use a tighter close-up that makes the dish or drink feel more appetizing while preserving natural plating edges and avoiding awkward cutoffs.\n"
-        "12. If color_grading is used, fill contrast, highlights, shadows, vibrance, saturation, temperature, and tone_curve_shadow_lift explicitly.\n"
-        "13. The output params should represent the per-image adjustment needed to move toward the preset, not the preset value itself.\n"
-        "14. If denoise is used, it must appear before any filter tool.\n"
-        + (
-            "15. Upscale must be included for every image, it is 2x only, and it must appear exactly once as the last tool.\n"
-            "16. Do not place upscale on an image unless at least one filter tool precedes it.\n"
-            "17. Denoise alone is not enough to justify upscale; insert a filter before upscale.\n"
-            if settings.FINAL_EDIT_ENABLE_UPSCALE
-            else "15. Upscale is temporarily disabled. Do not use the upscale tool.\n"
-        )
-        + "18. Treat color_grading, sharpen, and background_blur as filter tools for ordering.\n"
-        + "19. Output only a JSON array.\n\n"
+        "3. Analyze each image's main subject and the mood implied by the caption and keywords.\n"
+        "4. Select exactly one filter from the filter catalog for each image.\n"
+        "5. The only allowed tool is filter.\n"
+        "6. tools must be exactly [\"filter\"] for every image.\n"
+        "7. params.filter must be exactly {\"filter_name\": \"<catalog filter name>\"}.\n"
+        "8. filter_name must match a catalog name exactly.\n"
+        "9. Do not output any numeric editing parameters such as contrast, saturation, highlights, shadows, vibrance, temperature, brightness, crop boxes, sharpen strength, or blur radius.\n"
+        "10. In strategy, briefly explain why the chosen filter fits the subject and caption mood.\n"
+        "11. Output only a JSON array.\n\n"
         f"{_few_shot_example()}"
     )
 
@@ -486,7 +433,7 @@ def parse_image_edit_plans(
     if not isinstance(payload, list):
         raise FinalEditPlanningError("Planner payload must be a list.")
 
-    allowed_tools = set(supported_tool_names(True))
+    allowed_tools = {"filter"}
     seen_indexes: set[int] = set()
     plans: list[ImageEditPlan] = []
 
@@ -509,8 +456,8 @@ def parse_image_edit_plans(
         seen_indexes.add(image_index)
 
         tools = item["tools"]
-        if not isinstance(tools, list) or not tools:
-            raise FinalEditPlanningError("tools must be a non-empty list.")
+        if not isinstance(tools, list) or tools != ["filter"]:
+            raise FinalEditPlanningError('tools must be exactly ["filter"].')
 
         normalized_tools: list[ToolName] = []
         for tool_name in tools:
@@ -528,12 +475,14 @@ def parse_image_edit_plans(
                 raise FinalEditPlanningError(
                     f"params for tool '{tool_name}' must be an object."
                 )
-            if tool_name == "crop":
-                subject_boxes = tool_params.get("subject_boxes")
-                if not isinstance(subject_boxes, list) or not subject_boxes:
-                    raise FinalEditPlanningError(
-                        "crop params must include a non-empty subject_boxes list."
+            if tool_name == "filter":
+                try:
+                    normalized_filter_name = resolve_final_edit_filter_name(
+                        tool_params.get("filter_name")
                     )
+                except FinalEditFilterCatalogError as exc:
+                    raise FinalEditPlanningError(str(exc)) from exc
+                tool_params = {"filter_name": normalized_filter_name}
             normalized_params[tool_name] = tool_params
 
         content = str(item["content"]).strip()

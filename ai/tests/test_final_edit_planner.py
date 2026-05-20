@@ -1,6 +1,8 @@
 import pytest
 
 from app.core.config import settings
+from app.services import final_edit_filter_catalog as filter_catalog_module
+from app.services.final_edit_filter_catalog import FinalEditFilterCatalogError
 from app.services.final_edit_planner import (
     TARGET_PROFILE_KIND_TONE,
     FinalEditPlannerClient,
@@ -9,11 +11,12 @@ from app.services.final_edit_planner import (
     ImageEditPlan,
     build_default_final_edit_plan,
     build_final_edit_prompt,
+    load_final_edit_filter_catalog,
     load_final_edit_session_context,
     normalize_image_edit_plan,
     parse_image_edit_plans,
-    resolve_owner_persona_target,
     resolve_owner_persona_preset,
+    resolve_owner_persona_target,
 )
 from app.services.final_edit_tools import AESTHETIC_TARGET_TONE_PROFILE
 from app.services.sessions import session_key
@@ -48,18 +51,18 @@ async def test_load_final_edit_session_context_uses_draft_keywords(
         session_key("sess-1"),
         mapping={
             "owner_persona": "friendly",
-            "caption": "포근한 디저트 소개",
-            "draft_keyword:2": "따뜻한 분위기",
-            "draft_keyword:1": "시그니처 케이크",
-            "final_keyword:1": "1001:케이크",
+            "caption": "dessert intro",
+            "draft_keyword:2": "warm cafe",
+            "draft_keyword:1": "signature cake",
+            "final_keyword:1": "1001:cake",
         },
     )
 
     context = await load_final_edit_session_context(fake_redis_async, "sess-1")
 
     assert context.owner_persona == "friendly"
-    assert context.caption == "포근한 디저트 소개"
-    assert context.keywords == ["시그니처 케이크", "따뜻한 분위기"]
+    assert context.caption == "dessert intro"
+    assert context.keywords == ["signature cake", "warm cafe"]
 
 
 @pytest.mark.asyncio
@@ -69,90 +72,97 @@ async def test_load_final_edit_session_context_falls_back_to_final_keywords(
     await fake_redis_async.hset(
         session_key("sess-2"),
         mapping={
-            "caption": "매장 분위기 소개",
-            "final_keyword:2": "2002:테이블",
-            "final_keyword:1": "1001:케이크",
+            "caption": "store mood",
+            "final_keyword:2": "2002:table",
+            "final_keyword:1": "1001:cake",
         },
     )
 
     context = await load_final_edit_session_context(fake_redis_async, "sess-2")
 
     assert context.owner_persona == "aesthetic"
-    assert context.keywords == ["케이크", "테이블"]
+    assert context.keywords == ["cake", "table"]
 
 
-def test_build_final_edit_prompt_includes_caption_and_keywords() -> None:
+def test_load_final_edit_filter_catalog_returns_named_filters() -> None:
+    catalog = load_final_edit_filter_catalog()
+
+    assert catalog
+    assert catalog[0].name
+    assert catalog[0].description
+    assert catalog[0].pilgram2_name
+
+
+def test_load_final_edit_filter_catalog_maps_display_name_to_callable_name() -> None:
+    catalog = {definition.name: definition for definition in load_final_edit_filter_catalog()}
+
+    assert catalog["X-Pro II"].pilgram2_name == "xpro2"
+    assert catalog["Lo-Fi"].pilgram2_name == "lofi"
+
+
+def test_load_final_edit_filter_catalog_rejects_missing_pilgram2_name(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid_catalog = tmp_path / "invalid_filters.json"
+    invalid_catalog.write_text(
+        '[{"name":"Clarendon","description":"desc"}]',
+        encoding="utf-8",
+    )
+    load_final_edit_filter_catalog.cache_clear()
+    monkeypatch.setattr(
+        filter_catalog_module,
+        "FINAL_EDIT_FILTER_CATALOG_PATH",
+        invalid_catalog,
+    )
+
+    with pytest.raises(FinalEditFilterCatalogError, match="pilgram2_name"):
+        load_final_edit_filter_catalog()
+
+    monkeypatch.undo()
+    load_final_edit_filter_catalog.cache_clear()
+
+
+def test_build_final_edit_prompt_includes_filter_catalog_and_rules() -> None:
     prompt = build_final_edit_prompt(
         FinalEditSessionContext(
             owner_persona="friendly",
-            caption="포근한 케이크 소개",
-            keywords=["시그니처 케이크", "크림 디저트"],
+            caption="cozy cake intro",
+            keywords=["dessert", "latte"],
         ),
         3,
     )
 
     assert "[owner_persona] friendly" in prompt
-    assert "[target_preset_persona] friendly" in prompt
-    assert "[caption] 포근한 케이크 소개" in prompt
-    assert "[keywords] 시그니처 케이크, 크림 디저트" in prompt
-    assert "\"contrast\"" in prompt
-    assert "minimum adjustment needed" in prompt
-    assert "color_grading" in prompt
-    assert "subject_boxes" in prompt
-    assert "3:4" in prompt
-    assert "Upscale must be included for every image" in prompt
-    assert "it is 2x only" in prompt
-    assert "exactly once as the last tool" in prompt
-    assert "Denoise alone is not enough to justify upscale" in prompt
+    assert "[caption] cozy cake intro" in prompt
+    assert '[filter catalog]' in prompt
+    assert 'tools must be exactly ["filter"]' in prompt
+    assert '"filter_name": "<catalog filter name>"' in prompt
+    assert "Do not output any numeric editing parameters" in prompt
+    assert "Valencia" in prompt
+    assert "pilgram2_name" not in prompt
     assert "all 3 input images" in prompt
     assert "image_index from 0 to 2" in prompt
+    assert "color_grading" not in prompt
 
 
-def test_build_final_edit_prompt_uses_aesthetic_tone_profile() -> None:
+def test_build_final_edit_prompt_keeps_aesthetic_target_profile_context() -> None:
     prompt = build_final_edit_prompt(
         FinalEditSessionContext(
             owner_persona="aesthetic",
-            caption="분위기 설명",
-            keywords=["케이크"],
+            caption="airy lifestyle post",
+            keywords=["morning"],
         ),
         1,
     )
 
     assert "[target_profile_kind] tone_profile" in prompt
-    assert "\"brightness\"" in prompt
-    assert "\"tolerance\"" in prompt
+    assert '"brightness"' in prompt
+    assert '"tolerance"' in prompt
     assert (
         f"\"target\": {AESTHETIC_TARGET_TONE_PROFILE['brightness']['target']}"
         in prompt
     )
-
-
-def test_build_final_edit_prompt_marks_food_or_beverage_focus() -> None:
-    prompt = build_final_edit_prompt(
-        FinalEditSessionContext(
-            owner_persona="friendly",
-            caption="signature cake and coffee on a cafe table",
-            keywords=["dessert", "menu"],
-        ),
-        1,
-    )
-
-    assert "[content_focus_hint] likely_food_or_beverage" in prompt
-    assert "prefer an Instagram-friendly hero shot" in prompt
-    assert "tighter close-up" in prompt
-
-
-def test_build_final_edit_prompt_marks_general_scene_when_food_hint_missing() -> None:
-    prompt = build_final_edit_prompt(
-        FinalEditSessionContext(
-            owner_persona="friendly",
-            caption="store entrance with plants",
-            keywords=["signage", "door"],
-        ),
-        1,
-    )
-
-    assert "[content_focus_hint] general_scene" in prompt
 
 
 def test_resolve_owner_persona_preset_falls_back_to_aesthetic() -> None:
@@ -174,94 +184,68 @@ def test_resolve_owner_persona_target_marks_aesthetic_as_tone_profile() -> None:
     assert target_kind == TARGET_PROFILE_KIND_TONE
 
 
-def test_normalize_image_edit_plan_enforces_execution_order() -> None:
+def test_normalize_image_edit_plan_orders_filter_before_upscale() -> None:
     normalized = normalize_image_edit_plan(
         ImageEditPlan(
             image_index=0,
             content="cake",
-            strategy="upscale first",
-            tools=["upscale", "sharpen", "crop", "denoise", "color_grading"],
+            strategy="unordered",
+            tools=["upscale", "sharpen", "filter", "denoise"],
             params={
                 "upscale": {"scale": 4},
                 "sharpen": {"strength": 0.3},
-                "crop": {"subject_boxes": [[10, 10, 90, 110]]},
+                "filter": {"filter_name": "Valencia"},
                 "denoise": {"strength": 0.4},
-                "color_grading": {"contrast": -10},
             },
-        )
+        ),
+        upscale_enabled=True,
     )
 
-    assert normalized.tools == ["crop", "denoise", "sharpen", "color_grading", "upscale"]
+    assert normalized.tools == ["denoise", "sharpen", "filter", "upscale"]
     assert normalized.params["upscale"] == {"scale": 2}
 
 
-def test_normalize_image_edit_plan_appends_default_upscale() -> None:
+def test_normalize_image_edit_plan_appends_default_upscale_to_non_empty_plan() -> None:
     normalized = normalize_image_edit_plan(
         ImageEditPlan(
             image_index=0,
             content="cake",
-            strategy="denoise and sharpen",
-            tools=["sharpen", "denoise"],
-            params={
-                "sharpen": {"strength": 0.3},
-                "denoise": {"strength": 0.4},
-            },
-        )
+            strategy="filter only",
+            tools=["filter"],
+            params={"filter": {"filter_name": "Clarendon"}},
+        ),
+        upscale_enabled=True,
     )
 
-    assert normalized.tools == ["denoise", "sharpen", "upscale"]
+    assert normalized.tools == ["filter", "upscale"]
+    assert normalized.params["filter"] == {"filter_name": "Clarendon"}
     assert normalized.params["upscale"] == {"scale": 2}
 
 
-def test_normalize_image_edit_plan_deduplicates_upscale_to_single_last_step() -> None:
+def test_normalize_image_edit_plan_keeps_noop_plan_empty() -> None:
     normalized = normalize_image_edit_plan(
         ImageEditPlan(
             image_index=0,
-            content="cake",
-            strategy="duplicate upscale",
-            tools=["upscale", "color_grading", "upscale", "denoise"],
-            params={
-                "upscale": {"scale": 4},
-                "color_grading": {"contrast": -10},
-                "denoise": {"strength": 0.4},
-            },
+            content="draft image",
+            strategy="keep original",
+            tools=[],
+            params={},
         )
     )
 
-    assert normalized.tools == ["denoise", "color_grading", "upscale"]
-    assert normalized.tools.count("upscale") == 1
-    assert normalized.params["upscale"] == {"scale": 2}
+    assert normalized.tools == []
+    assert normalized.params == {}
 
 
-def test_build_default_final_edit_plan_uses_default_two_x_scale() -> None:
+def test_build_default_final_edit_plan_is_noop() -> None:
     plan = build_default_final_edit_plan(1)
 
     assert plan.image_index == 1
-    assert plan.tools == ["color_grading", "upscale"]
-    assert plan.params["color_grading"] == {}
-    assert plan.params["upscale"] == {"scale": 2}
+    assert plan.tools == []
+    assert plan.params == {}
 
 
-def test_build_default_final_edit_plan_uses_persona_preset_for_non_aesthetic() -> None:
-    plan = build_default_final_edit_plan(1, owner_persona="friendly")
-
-    assert plan.tools == ["color_grading", "upscale"]
-    assert plan.params["color_grading"]["temperature"] == "warm"
-
-
-def test_build_default_final_edit_plan_omits_upscale_when_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(settings, "FINAL_EDIT_ENABLE_UPSCALE", False)
-
-    plan = build_default_final_edit_plan(1, owner_persona="friendly")
-
-    assert plan.tools == ["color_grading"]
-    assert "upscale" not in plan.params
-    assert plan.params["color_grading"]["temperature"] == "warm"
-
-
-def test_build_final_edit_prompt_omits_upscale_when_disabled(
+def test_build_final_edit_prompt_is_stable_when_upscale_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "FINAL_EDIT_ENABLE_UPSCALE", False)
@@ -275,7 +259,7 @@ def test_build_final_edit_prompt_omits_upscale_when_disabled(
         1,
     )
 
-    assert "Upscale is temporarily disabled" in prompt
+    assert 'tools must be exactly ["filter"]' in prompt
     assert "Upscale must be included for every image" not in prompt
 
 
@@ -288,76 +272,86 @@ def test_normalize_image_edit_plan_drops_upscale_when_disabled(
         ImageEditPlan(
             image_index=0,
             content="cake",
-            strategy="upscale first",
-            tools=["upscale", "sharpen", "denoise"],
+            strategy="filter then upscale",
+            tools=["upscale", "filter"],
             params={
                 "upscale": {"scale": 4},
-                "sharpen": {"strength": 0.3},
-                "denoise": {"strength": 0.4},
+                "filter": {"filter_name": "Juno"},
             },
         )
     )
 
-    assert normalized.tools == ["denoise", "sharpen"]
+    assert normalized.tools == ["filter"]
     assert "upscale" not in normalized.params
 
 
-def test_parse_image_edit_plans_replaces_upscale_only_plan_when_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(settings, "FINAL_EDIT_ENABLE_UPSCALE", False)
-
+def test_parse_image_edit_plans_accepts_filter_and_appends_upscale() -> None:
     plans = parse_image_edit_plans(
         """
         [
           {
             "image_index": 0,
-            "content": "cake",
-            "strategy": "upscale only",
-            "tools": ["upscale"],
-            "params": {"upscale": {"scale": 2}}
+            "content": "cake and latte on a wooden table",
+            "strategy": "Warm cafe mood fits Valencia.",
+            "tools": ["filter"],
+            "params": {"filter": {"filter_name": "valencia"}}
           }
         ]
         """,
+        upscale_enabled=True,
         owner_persona="friendly",
     )
 
     assert len(plans) == 1
-    assert plans[0].tools == ["color_grading"]
-    assert plans[0].params["color_grading"]["temperature"] == "warm"
+    assert plans[0].tools == ["filter", "upscale"]
+    assert plans[0].params["filter"]["filter_name"] == "Valencia"
 
 
-def test_parse_image_edit_plans_rejects_unsupported_tool() -> None:
-    with pytest.raises(FinalEditPlanningError, match="Unsupported tool"):
+def test_parse_image_edit_plans_rejects_catalog_miss() -> None:
+    with pytest.raises(FinalEditPlanningError, match="Unsupported filter requested"):
         parse_image_edit_plans(
             """
             [
               {
                 "image_index": 0,
                 "content": "cake",
-                "strategy": "remove object",
-                "tools": ["object_removal"],
-                "params": {"object_removal": {"target": "logo"}}
+                "strategy": "unknown filter",
+                "tools": ["filter"],
+                "params": {"filter": {"filter_name": "Unknown Filter"}}
               }
             ]
             """
         )
 
 
-def test_parse_image_edit_plans_requires_subject_boxes_for_crop() -> None:
-    with pytest.raises(FinalEditPlanningError, match="subject_boxes"):
+def test_parse_image_edit_plans_requires_filter_name() -> None:
+    with pytest.raises(FinalEditPlanningError, match="filter_name"):
         parse_image_edit_plans(
             """
             [
               {
                 "image_index": 0,
                 "content": "cake",
-                "strategy": "crop first",
-                "tools": ["crop", "color_grading"],
-                "params": {
-                  "crop": {},
-                  "color_grading": {"contrast": -4}
-                }
+                "strategy": "missing filter",
+                "tools": ["filter"],
+                "params": {"filter": {}}
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_rejects_color_grading_tool() -> None:
+    with pytest.raises(FinalEditPlanningError, match='tools must be exactly \\["filter"\\]'):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "grade it",
+                "tools": ["color_grading"],
+                "params": {"color_grading": {"contrast": -4}}
               }
             ]
             """
@@ -367,48 +361,45 @@ def test_parse_image_edit_plans_requires_subject_boxes_for_crop() -> None:
 @pytest.mark.asyncio
 async def test_final_edit_planner_client_builds_validated_plans() -> None:
     client = _planner_client()
+    original = settings.FINAL_EDIT_ENABLE_UPSCALE
+    settings.FINAL_EDIT_ENABLE_UPSCALE = True
 
-    async def fake_request_plan(image_paths, context):
-        assert image_paths == ["a.jpg", "b.jpg"]
-        assert context.owner_persona == "friendly"
-        assert context.caption == "포근한 디저트 소개"
-        return """
-        [
-          {
-            "image_index": 0,
-            "content": "시그니처 케이크가 보인다.",
-            "strategy": "현재 톤이 목표 프리셋보다 더 밝고 선명해서 색과 하이라이트를 살짝 낮춘다.",
-            "tools": ["denoise", "color_grading"],
-            "params": {
-              "denoise": {"strength": 0.4},
-              "color_grading": {
-                "contrast": -8,
-                "highlights": -10,
-                "shadows": 6,
-                "vibrance": -4,
-                "saturation": -6,
-                "temperature": "warm",
-                "tone_curve_shadow_lift": 4
+    try:
+        async def fake_request_plan(image_paths, context):
+            assert image_paths == ["a.jpg", "b.jpg"]
+            assert context.owner_persona == "friendly"
+            assert context.caption == "dessert intro"
+            return """
+            [
+              {
+                "image_index": 0,
+                "content": "signature cake on a cafe table",
+                "strategy": "The warm cafe mood and dessert subject fit Valencia best.",
+                "tools": ["filter"],
+                "params": {
+                  "filter": {"filter_name": "Valencia"}
+                }
               }
-            }
-          }
-        ]
-        """
+            ]
+            """
 
-    client._request_plan = fake_request_plan  # type: ignore[method-assign]
+        client._request_plan = fake_request_plan  # type: ignore[method-assign]
 
-    plans = await client.build_plans(
-        ["a.jpg", "b.jpg"],
-        FinalEditSessionContext(
-            owner_persona="friendly",
-            caption="포근한 디저트 소개",
-            keywords=["케이크"],
-        ),
-    )
+        plans = await client.build_plans(
+            ["a.jpg", "b.jpg"],
+            FinalEditSessionContext(
+                owner_persona="friendly",
+                caption="dessert intro",
+                keywords=["cake"],
+            ),
+        )
+    finally:
+        settings.FINAL_EDIT_ENABLE_UPSCALE = original
 
     assert len(plans) == 1
     assert plans[0].image_index == 0
-    assert plans[0].tools == ["denoise", "color_grading", "upscale"]
+    assert plans[0].tools == ["filter", "upscale"]
+    assert plans[0].params["filter"]["filter_name"] == "Valencia"
 
 
 @pytest.mark.asyncio
@@ -420,11 +411,11 @@ async def test_final_edit_planner_client_rejects_out_of_range_index() -> None:
         [
           {
             "image_index": 2,
-            "content": "매장 배경",
-            "strategy": "밝기를 높인다.",
-            "tools": ["color_grading"],
+            "content": "store interior",
+            "strategy": "Soft clean mood fits Reyes.",
+            "tools": ["filter"],
             "params": {
-              "color_grading": {"temperature": "warm", "saturation": 0.1, "brightness": 0.1}
+              "filter": {"filter_name": "Reyes"}
             }
           }
         ]
@@ -435,5 +426,5 @@ async def test_final_edit_planner_client_rejects_out_of_range_index() -> None:
     with pytest.raises(FinalEditPlanningError, match="out-of-range"):
         await client.build_plans(
             ["a.jpg", "b.jpg"],
-            FinalEditSessionContext(caption="배경 소개", keywords=["매장"]),
+            FinalEditSessionContext(caption="store intro", keywords=["interior"]),
         )

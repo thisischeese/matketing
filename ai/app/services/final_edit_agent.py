@@ -13,6 +13,7 @@ from app.services.final_edit_planner import (
     ImageEditPlan,
     normalize_image_edit_plan,
 )
+from app.services.final_edit_filter_catalog import resolve_final_edit_filter_definition
 from app.services.final_edit_runtime import import_cv2
 from app.services.final_edit_tools import (
     build_aesthetic_color_grading_params,
@@ -140,8 +141,22 @@ class FinalEditAgent:
                 params.get("spotlight_protection", False)
             )
             state.metadata["aesthetic_tone_debug"] = tone_debug
+        if tool_name == "filter":
+            try:
+                filter_definition = resolve_final_edit_filter_definition(
+                    params["filter_name"]
+                )
+            except Exception:
+                state.metadata["current_tool_params"] = params
+            else:
+                state.metadata["current_tool_params"] = {
+                    **params,
+                    "backend": "pilgram2",
+                    "callable": filter_definition.pilgram2_name,
+                }
+        else:
+            state.metadata["current_tool_params"] = params
         state.metadata["current_tool_order"] = state.current_tool_index + 1
-        state.metadata["current_tool_params"] = params
         state.metadata["current_tool_input_shape"] = self._shape_to_string(
             state.current_image
         )
@@ -187,6 +202,10 @@ class FinalEditAgent:
 
     def _finalize(self, state: FinalEditImageState) -> FinalEditImageState:
         if state.fallback_to_original or state.current_image is None:
+            state.output_path = state.image_path
+            state.metadata["output_source"] = "original_fallback"
+            return state
+        if not state.plan.tools:
             state.output_path = state.image_path
             state.metadata["output_source"] = "original_fallback"
             return state

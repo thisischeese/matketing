@@ -300,14 +300,12 @@ async def test_final_edit_emits_stage_logs(tmp_path: Path) -> None:
                     image_index=0,
                     content="케이크",
                     strategy="디노이즈 후 샤프닝",
-                    tools=["denoise", "sharpen"],
-                    params={
-                        "denoise": {"strength": 0.4},
-                        "sharpen": {"strength": 0.3},
-                    },
+                    tools=["filter"],
+                    params={"filter": {"filter_name": "Valencia"}},
                 )
             ]
         ),
+        upscale_enabled=True,
     )
 
     with capture_app_logs() as stream:
@@ -334,6 +332,8 @@ async def test_final_edit_emits_stage_logs(tmp_path: Path) -> None:
     assert 'event="final_edit.tool.started"' in output
     assert 'tool_order=1' in output
     assert 'tool_params=' in output
+    assert 'Valencia' in output
+    assert 'valencia' in output
     assert 'input_shape="16x16x3"' in output
     assert 'event="final_edit.tool.completed"' in output
     assert 'output_shape="32x32x3"' in output
