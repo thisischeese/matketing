@@ -29,6 +29,7 @@ dependencies = [
     { name = "onnxruntime" },
     { name = "openai" },
     { name = "opencv-python-headless" },
+    { name = "pilgram2" },
     { name = "pillow" },
     { name = "pydantic-settings" },
     { name = "redis" },
@@ -60,6 +61,7 @@ requires-dist = [
     { name = "onnxruntime", specifier = ">=1.18.0,<2.0.0" },
     { name = "openai", specifier = ">=2.36.0" },
     { name = "opencv-python-headless", specifier = ">=4.10.0,<5.0.0" },
+    { name = "pilgram2", specifier = ">=2.0.10,<3.0.0" },
     { name = "pillow", specifier = ">=10.0.0,<12.0.0" },
     { name = "pydantic-settings", specifier = ">=2.3.0,<3.0.0" },
     { name = "redis", specifier = ">=5.0.0,<6.0.0" },
@@ -1717,6 +1719,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d7/f1/e7a6dd94a8d4a5626c03e4e99c87f241ba9e350cd9e6d75123f992427270/packaging-26.2.tar.gz", hash = "sha256:ff452ff5a3e828ce110190feff1178bb1f2ea2281fa2075aadb987c2fb221661", size = 228134, upload-time = "2026-04-24T20:15:23.917Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl", hash = "sha256:5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e", size = 100195, upload-time = "2026-04-24T20:15:22.081Z" },
+]
+
+[[package]]
+name = "pilgram2"
+version = "2.0.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pillow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/61/e1/0c5d0839c76c10f71d497a43933111acaf86705a08a7069aebc016d0eee5/pilgram2-2.0.10.tar.gz", hash = "sha256:5aa4d9f5b2f056ec253a29510a3246b9a0919b6884c86d2b37b728daec903f1d", size = 96472, upload-time = "2025-11-23T17:31:30.584Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/68/1f/0abf86623212f90fd14b16d425e175596c22004ec6f5181e75b607b36c16/pilgram2-2.0.10-py3-none-any.whl", hash = "sha256:020cc856b36ebd2f1ba7d8ca392480fbb73258b5484ca5e999f7371d6edf1d9b", size = 195214, upload-time = "2025-11-23T17:31:29.313Z" },
 ]
 
 [[package]]

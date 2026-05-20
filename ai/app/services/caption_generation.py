@@ -58,7 +58,7 @@ _STRICT_KOREAN_USER_SUFFIX = """
 - 브랜드명, 메뉴명, 고유명사는 필요한 경우에만 최소한으로 사용하세요.
 """
 
-_MENU_PROMOTION_PROMPT_TEMPLATE = """당신은 50-60대 자영업자의 메뉴 홍보 게시물을 작성하는 한국어 마케팅 도우미입니다.
+_MENU_PROMOTION_STATIC_PREFIX = """당신은 50-60대 자영업자의 메뉴 홍보 게시물을 작성하는 한국어 마케팅 도우미입니다.
 
 규칙:
 - 출력은 JSON 객체 텍스트만 반환합니다.
@@ -66,20 +66,39 @@ _MENU_PROMOTION_PROMPT_TEMPLATE = """당신은 50-60대 자영업자의 메뉴 �
 - 게시물 목적은 "메뉴 홍보"입니다.
 - guide_text는 사진이나 영상에서 무엇을 더 잘 보이게 촬영하면 좋은지 알려주는 한국어 한 문장입니다.
 - caption은 메뉴 홍보용 한국어 인스타그램 캡션입니다.
-- 입력에 없는 메뉴나 재료를 지어내지 마세요.
+- 입력에 없는 메뉴나 재료, 가게 이름을 지어내지 마세요.
 - 메뉴명과 메뉴 설명을 우선으로 활용하고, 사용자 발화와 draft_keywords를 자연스럽게 반영하세요.
-- 날씨와 날짜는 문맥에 맞을 때만 자연스럽게 녹여 쓰세요.
+- 날씨는 문맥에 맞을 때만 자연스럽게 녹여 쓰고 날짜는 공휴일, 계절 등에 어긋나지 않는지 확인하는 용도로 사용하세요.
 
-입력:
-- owner_persona: {owner_persona}
-- today: {today}
-- weather_context: {weather_context}
-- utterance: {utterance}
-- draft_keywords: {draft_keywords}
-- matched_keyword: {matched_keyword}
-- menu_name: {menu_name}
-- menu_description: {menu_description}
 """
+
+
+def build_caption_generation_static_prefix() -> str:
+    return _MENU_PROMOTION_STATIC_PREFIX
+
+
+def build_caption_generation_dynamic_suffix(
+    *,
+    owner_persona: str,
+    today: str,
+    weather_context: str,
+    utterance: str,
+    draft_keywords: str,
+    matched_keyword: str,
+    menu_name: str,
+    menu_description: str,
+) -> str:
+    return (
+        "입력:\n"
+        f"- owner_persona: {owner_persona}\n"
+        f"- today: {today}\n"
+        f"- weather_context: {weather_context}\n"
+        f"- utterance: {utterance}\n"
+        f"- draft_keywords: {draft_keywords}\n"
+        f"- matched_keyword: {matched_keyword}\n"
+        f"- menu_name: {menu_name}\n"
+        f"- menu_description: {menu_description}\n"
+    )
 
 _PRIMARY_WEATHER_TAG_PRIORITY = (
     PRECIP_HEAVY_RAIN,
@@ -191,10 +210,14 @@ class CaptionFallbackResult:
 
 
 class CaptionPipeline:
-    def __init__(self, prompt_template: str) -> None:
-        self.prompt_template = prompt_template
+    def __init__(self, static_prefix: str) -> None:
+        self.static_prefix = static_prefix
 
     def build_prompt(self, request: CaptionGenerationRequest) -> str:
+        dynamic_suffix = self.build_dynamic_suffix(request)
+        return self._compose_prompt(dynamic_suffix)
+
+    def build_dynamic_suffix(self, request: CaptionGenerationRequest) -> str:
         owner_persona = request.owner_persona.strip() or "사장님 감성"
         today = request.today.strip() or "오늘"
         weather_context = _build_weather_context(request.weather_tags)
@@ -213,19 +236,8 @@ class CaptionPipeline:
             MAX_MENU_DESCRIPTION_CHARS,
         )
 
-        prompt = self.prompt_template.format(
-            owner_persona=owner_persona,
-            today=today,
-            weather_context=weather_context,
-            utterance=utterance,
-            draft_keywords=draft_keywords,
-            matched_keyword=matched_keyword,
-            menu_name=menu_name,
-            menu_description=menu_description,
-        )
         return self._shrink_prompt_if_needed(
             request=request,
-            prompt=prompt,
             owner_persona=owner_persona,
             today=today,
             weather_context=weather_context,
@@ -235,6 +247,9 @@ class CaptionPipeline:
             menu_description=menu_description,
             utterance=utterance,
         )
+
+    def _compose_prompt(self, dynamic_suffix: str) -> str:
+        return f"{self.static_prefix}\n\n{dynamic_suffix}"
 
     def build_fallback(
         self,
@@ -263,7 +278,6 @@ class CaptionPipeline:
         self,
         *,
         request: CaptionGenerationRequest,
-        prompt: str,
         owner_persona: str,
         today: str,
         weather_context: str,
@@ -273,18 +287,28 @@ class CaptionPipeline:
         menu_description: str,
         utterance: str,
     ) -> str:
-        current_prompt = prompt
         current_description = menu_description
         current_utterance = utterance
+        current_dynamic_suffix = build_caption_generation_dynamic_suffix(
+            owner_persona=owner_persona,
+            today=today,
+            weather_context=weather_context,
+            utterance=current_utterance,
+            draft_keywords=draft_keywords,
+            matched_keyword=matched_keyword,
+            menu_name=menu_name,
+            menu_description=current_description,
+        )
+        current_prompt = self._compose_prompt(current_dynamic_suffix)
 
         if len(current_prompt) <= MAX_PROMPT_CHARS:
-            return current_prompt
+            return current_dynamic_suffix
 
         current_description = _truncate_text(
             current_description,
             min(160, len(current_description)),
         )
-        current_prompt = self.prompt_template.format(
+        current_dynamic_suffix = build_caption_generation_dynamic_suffix(
             owner_persona=owner_persona,
             today=today,
             weather_context=weather_context,
@@ -294,14 +318,15 @@ class CaptionPipeline:
             menu_name=menu_name,
             menu_description=current_description,
         )
+        current_prompt = self._compose_prompt(current_dynamic_suffix)
         if len(current_prompt) <= MAX_PROMPT_CHARS:
-            return current_prompt
+            return current_dynamic_suffix
 
         current_utterance = _truncate_text(
             current_utterance,
             min(160, len(current_utterance)),
         )
-        current_prompt = self.prompt_template.format(
+        current_dynamic_suffix = build_caption_generation_dynamic_suffix(
             owner_persona=owner_persona,
             today=today,
             weather_context=weather_context,
@@ -311,11 +336,12 @@ class CaptionPipeline:
             menu_name=menu_name,
             menu_description=current_description,
         )
+        current_prompt = self._compose_prompt(current_dynamic_suffix)
         if len(current_prompt) <= MAX_PROMPT_CHARS:
-            return current_prompt
+            return current_dynamic_suffix
 
         compact_keywords = self._format_keywords(request.draft_keywords[:2])
-        return self.prompt_template.format(
+        return build_caption_generation_dynamic_suffix(
             owner_persona=owner_persona,
             today=today,
             weather_context=weather_context,
@@ -353,7 +379,7 @@ class CaptionPipeline:
 
 
 def _build_menu_promotion_pipeline() -> CaptionPipeline:
-    return CaptionPipeline(_MENU_PROMOTION_PROMPT_TEMPLATE)
+    return CaptionPipeline(build_caption_generation_static_prefix())
 
 
 class CaptionGenerationService:
@@ -410,6 +436,7 @@ class CaptionGenerationService:
                 "Caption generation model is disabled."
             )
 
+        dynamic_suffix = self._pipeline.build_dynamic_suffix(request)
         prompt = self._pipeline.build_prompt(request)
         started_at = time.perf_counter()
 
@@ -433,7 +460,7 @@ class CaptionGenerationService:
         )
 
         try:
-            result = await self._generate_korean_result(prompt)
+            result = await self._generate_korean_result(dynamic_suffix)
         except TimeoutError as exc:
             raise CaptionGenerationUnavailableError(
                 "Caption generation timed out."
@@ -472,27 +499,16 @@ class CaptionGenerationService:
 
     def _build_request_payload(
         self,
-        prompt: str,
+        dynamic_suffix: str,
         include_response_format: bool,
         *,
         strict_language: bool,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": self._build_system_instruction(
-                        strict_language=strict_language
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": self._build_user_prompt(
-                        prompt,
-                        strict_language=strict_language,
-                    ),
-                },
-            ],
+            "messages": self._build_messages(
+                dynamic_suffix,
+                strict_language=strict_language,
+            ),
             "temperature": self.temperature,
             "top_p": self.top_p,
             "max_tokens": self.max_tokens,
@@ -515,13 +531,13 @@ class CaptionGenerationService:
 
     async def _post_chat_completion(
         self,
-        prompt: str,
+        dynamic_suffix: str,
         *,
         include_response_format: bool,
         strict_language: bool,
     ) -> httpx.Response:
         payload = self._build_request_payload(
-            prompt,
+            dynamic_suffix,
             include_response_format,
             strict_language=strict_language,
         )
@@ -577,7 +593,7 @@ class CaptionGenerationService:
 
     async def _generate(
         self,
-        prompt: str,
+        dynamic_suffix: str,
         *,
         strict_language: bool,
     ) -> str:
@@ -590,7 +606,7 @@ class CaptionGenerationService:
         first_unsupported_status: int | None = None
         try:
             response = await self._post_chat_completion(
-                prompt,
+                dynamic_suffix,
                 include_response_format=self._response_format_supported,
                 strict_language=strict_language,
             )
@@ -601,7 +617,7 @@ class CaptionGenerationService:
                 first_unsupported_status = response.status_code
                 self._response_format_supported = False
                 response = await self._post_chat_completion(
-                    prompt,
+                    dynamic_suffix,
                     include_response_format=False,
                     strict_language=strict_language,
                 )
@@ -651,10 +667,10 @@ class CaptionGenerationService:
 
     async def _generate_korean_result(
         self,
-        prompt: str,
+        dynamic_suffix: str,
     ) -> CaptionGenerationResult:
         raw_output = await self._generate(
-            prompt,
+            dynamic_suffix,
             strict_language=False,
         )
         try:
@@ -674,7 +690,7 @@ class CaptionGenerationService:
             )
 
         raw_output = await self._generate(
-            prompt,
+            dynamic_suffix,
             strict_language=True,
         )
         try:
@@ -742,16 +758,41 @@ class CaptionGenerationService:
         return value.strip()
 
     @staticmethod
-    def _build_system_instruction(*, strict_language: bool) -> str:
+    def _build_messages(
+        dynamic_suffix: str,
+        *,
+        strict_language: bool,
+    ) -> list[dict[str, str]]:
+        messages = [
+            {
+                "role": "system",
+                "content": CaptionGenerationService._build_system_instruction(),
+            },
+            {
+                "role": "user",
+                "content": build_caption_generation_static_prefix(),
+            },
+            {
+                "role": "user",
+                "content": dynamic_suffix,
+            },
+        ]
         if strict_language:
-            return _STRICT_KOREAN_SYSTEM_INSTRUCTION
+            messages.append(
+                {
+                    "role": "user",
+                    "content": CaptionGenerationService._build_user_retry_suffix(),
+                }
+            )
+        return messages
+
+    @staticmethod
+    def _build_system_instruction() -> str:
         return _DEFAULT_SYSTEM_INSTRUCTION
 
     @staticmethod
-    def _build_user_prompt(prompt: str, *, strict_language: bool) -> str:
-        if strict_language:
-            return f"{prompt}{_STRICT_KOREAN_USER_SUFFIX}"
-        return prompt
+    def _build_user_retry_suffix() -> str:
+        return _STRICT_KOREAN_USER_SUFFIX.strip()
 
     def _validate_korean_output(self, guide_text: str, draft_caption: str) -> None:
         if self._looks_non_korean(guide_text) or self._looks_non_korean(draft_caption):

@@ -30,72 +30,104 @@ Run the production server locally with:
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+## Runtime model configuration
+
+The AI service calls separately served model APIs over HTTP. The active runtime
+configuration lives in `app/core/config.py` and is centered on remote client
+settings, not local model server provisioning.
+
+Keyword extraction settings:
+
+- `KEYWORD_MODEL_BASE_URL`
+- `KEYWORD_MODEL_CHAT_ENDPOINT`
+- `KEYWORD_MODEL_HEALTH_ENDPOINT`
+- `KEYWORD_MODEL_API_KEY`
+- `KEYWORD_MODEL_TIMEOUT_SECONDS`
+- `KEYWORD_MODEL_MAX_TOKENS`
+- `KEYWORD_MODEL_TEMPERATURE`
+- `KEYWORD_MODEL_TOP_P`
+- `KEYWORD_MODEL_ENABLED`
+
+Caption generation settings:
+
+- `CAPTION_MODEL_BASE_URL`
+- `CAPTION_MODEL_CHAT_ENDPOINT`
+- `CAPTION_MODEL_HEALTH_ENDPOINT`
+- `CAPTION_MODEL_API_KEY`
+- `CAPTION_MODEL_TIMEOUT_SECONDS`
+- `CAPTION_MODEL_MAX_TOKENS`
+- `CAPTION_MODEL_TEMPERATURE`
+- `CAPTION_MODEL_TOP_P`
+- `CAPTION_MODEL_ENABLED`
+
+Final edit planner settings:
+
+- `FINAL_EDIT_MODEL_BASE_URL`
+- `FINAL_EDIT_MODEL_CHAT_ENDPOINT`
+- `FINAL_EDIT_MODEL_HEALTH_ENDPOINT`
+- `FINAL_EDIT_MODEL_API_KEY`
+- `FINAL_EDIT_MODEL_TIMEOUT_SECONDS`
+- `FINAL_EDIT_MODEL_MAX_TOKENS`
+- `FINAL_EDIT_MODEL_TEMPERATURE`
+- `FINAL_EDIT_MODEL_TOP_P`
+- `FINAL_EDIT_MODEL_NAME`
+- `FINAL_EDIT_MODEL_ENABLED`
+- `FINAL_EDIT_ENABLE_UPSCALE`
+
 ## Keyword extraction runtime
 
-FastAPI no longer calls the keyword GGUF model directly during inference.
-Instead, keyword extraction sends HTTP requests to a separately served
-`keyword-server` container on the same Docker network.
+FastAPI no longer calls a keyword GGUF model directly during inference.
+Keyword extraction sends HTTP requests to a separately served model endpoint.
 
 - Base URL: `KEYWORD_MODEL_BASE_URL`
 - Chat endpoint: `KEYWORD_MODEL_CHAT_ENDPOINT`
 - Default target: `http://keyword-server:8001/v1/chat/completions`
 
-At startup, FastAPI only checks connectivity to the remote keyword server.
-If the server is unavailable, the app still starts and `process-utterance`
-can return `503` until the server becomes reachable.
+At startup, FastAPI only checks connectivity to the remote keyword server. If
+the server is unavailable, the app still starts and `process-utterance` can
+return `503` until the server becomes reachable.
 
 ## Keyword extraction flow
 
 When `process-utterance` receives the first shop-owner utterance, the keyword
-extraction flow now works in three steps:
+extraction flow works in two steps:
 
-1. `llama-server` classifies the utterance purpose as one of
-   `메뉴 홍보`, `영업 공지`, or `일상 공유`.
-2. `llama-server` extracts 1 to 3 raw keyword candidates as `keywords`.
-3. FastAPI normalizes each keyword with the morphology-based nounization path
-   and stores the normalized values as `draft_keywords`.
+1. The remote keyword model extracts 1 to 3 raw keyword candidates as `keywords`.
+2. FastAPI normalizes each keyword and stores the normalized values as
+   `draft_keywords`.
 
-The remote model contract is therefore:
+The remote model contract is:
 
 ```json
 {
-  "purpose": "메뉴 홍보",
   "keywords": ["막걸리", "파전"]
 }
 ```
 
-FastAPI persists the normalized keyword state in Redis as before and also saves
-the classified purpose under `debug:purpose` for internal tracing. The API
-response still returns only the generated caption and guide text.
+FastAPI persists the normalized keyword state in Redis. The public API response
+still returns only the generated caption and guide text.
 
 ## Canonical keyword flow
 
-After `draft_keywords` are produced, FastAPI now resolves each draft keyword to
-the nearest canonical keyword code.
+After `draft_keywords` are produced, FastAPI resolves each draft keyword to the
+nearest canonical keyword code.
 
-1. The AI service embeds each `draft_keyword` with
-   `intfloat/multilingual-e5-small`.
-2. It queries `maketing.canonical_keywords` with pgvector cosine similarity and
-   finds the nearest `display_name`.
+1. The AI service embeds each `draft_keyword` with `intfloat/multilingual-e5-small`.
+2. It queries `maketing.canonical_keywords` with pgvector cosine similarity.
 3. The matched row's `code` is stored as `final_keyword:*` in Redis.
-4. If lookup fails, the original `draft_keyword` is used as the `final_keyword`
-   fallback so the request still succeeds.
+4. If lookup fails, the original `draft_keyword` is used as the fallback.
 
 Current implementation notes:
 
 - `draft_keyword:*` remains the human-readable normalized keyword.
 - `final_keyword:*` is the canonical `code` when resolution succeeds.
-- User-facing caption and guide generation still use readable draft keywords,
-  while canonical codes are stored for downstream internal use.
-- `canonical_keywords.embedding` is assumed to be stored in the same dimension
-  as the local embedding model.
-- Backfill helper: `uv run python scripts/backfill_canonical_keyword_embeddings.py`
+- User-facing caption and guide generation still use readable draft keywords.
 
 ## Weather tag flow
 
-During the first `process-utterance` call, FastAPI also evaluates reusable
-weather tags from the request body's `weather` payload and stores them in the
-session for later text-generation steps.
+During the first `process-utterance` call, FastAPI evaluates reusable weather
+tags from the request body's `weather` payload and stores them in the session
+for later text-generation steps.
 
 - Stored Redis fields: `weather_tag:1`, `weather_tag:2`, ...
 - Current tag groups:
@@ -104,49 +136,19 @@ session for later text-generation steps.
   - humidity: `HUMID_LOW`, `HUMID_HIGH`
   - special conditions: `SPECIAL_FINE_DUST`, `SPECIAL_TYPHOON`, `SPECIAL_SEASONAL_CHANGE`
 
-Current implementation notes:
+## Local development
 
-- `cloud_cover` is interpreted by string mapping such as `맑음/clear/sunny` and `흐림/cloudy/overcast/구름많음`.
-- `PRECIP_SNOW` is intentionally excluded for now because the current request schema does not provide a reliable snowfall signal.
-- Weather tags are internal session state only; they are not exposed in the public API response yet.
+Local development can stay flexible as long as FastAPI can reach running model
+servers.
 
-## Local and deployment modes
-
-Keyword extraction now assumes a remote llama.cpp server regardless of whether
-FastAPI itself runs in Docker or directly on the host.
-
-### Ubuntu deployment
-
-Production deployment uses Docker Compose from the repository root.
-
-- `fastapi` runs as the `marketing-fastapi:latest` container.
-- `keyword-server` runs as `ghcr.io/ggml-org/llama.cpp:server`.
-- The GGUF file is mounted from the Ubuntu host through
-  `KEYWORD_MODEL_HOST_DIR` and `KEYWORD_MODEL_FILE`.
-- The default internal target from FastAPI is
-  `http://keyword-server:8001/v1/chat/completions`.
-
-Minimum deployment variables:
-
-- `KEYWORD_MODEL_HOST_DIR`
-- `KEYWORD_MODEL_FILE`
-- Optional: `KEYWORD_MODEL_CTX_SIZE`
-- Optional: `KEYWORD_MODEL_GPU_LAYERS`
-
-### Local development
-
-Local development can stay flexible. You do not need to mirror the Ubuntu
-deployment exactly as long as FastAPI can reach a running llama.cpp server.
-
-If FastAPI runs in Docker and the model server runs separately on the host,
-use:
+If FastAPI runs in Docker and a model server runs separately on the host, use:
 
 ```env
 KEYWORD_MODEL_BASE_URL=http://host.docker.internal:8080
 KEYWORD_MODEL_CHAT_ENDPOINT=/v1/chat/completions
 ```
 
-One working local example for the model server is:
+One working local example for a separately served keyword model is:
 
 ```powershell
 docker run --rm -p 8080:8080 `
@@ -158,15 +160,8 @@ docker run --rm -p 8080:8080 `
 If both services run under Compose, keep the default
 `KEYWORD_MODEL_BASE_URL=http://keyword-server:8001`.
 
-## Legacy local GGUF settings
-
-The previous local GGUF configuration is still kept in code as migration
-reference, but the active FastAPI inference path now depends on the remote
-`keyword-server`.
-
-- Legacy path: `ai/models/qwen-gguf/model.gguf`
-- Legacy repo: `Qwen/Qwen2.5-7B-Instruct-GGUF`
-- Legacy file: `qwen2.5-7b-instruct-q3_k_m.gguf`
+Legacy local GGUF download helpers still exist for keyword-model maintenance,
+but the active FastAPI inference path depends on remote model servers.
 
 ## Linux deployment notes
 
@@ -175,7 +170,5 @@ Keep the following in mind when preparing the server:
 
 - Do not copy `ai/.venv` from Windows to Linux. Create a new virtual environment on Linux and run `uv sync` there.
 - FastAPI no longer needs `llama-cpp-python` or a local GGUF mount to serve keyword extraction requests.
-- The GGUF model file is only mounted into the separate `keyword-server` container.
+- Any GGUF model file mounting happens in the separately served model container, not in FastAPI.
 - First startup may still take time if orientation weights need to be downloaded. Plan for this in container startup and health checks.
-- Connect `keyword-server` to the same Docker network as FastAPI and keep a stable service name.
-- Verify that the server has enough disk space and memory for `tensorflow-cpu`, the orientation weights, and the separately served keyword model container.

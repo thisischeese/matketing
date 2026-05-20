@@ -152,7 +152,7 @@ _WEATHER_CANONICAL_BY_HINT = (
     ("겨울", "겨울"),
 )
 
-_PROMPT_TEMPLATE = """당신은 한국어로 입력된 자영업자 발화를 읽고 메뉴 홍보 게시물에 사용할 메뉴 관련 키워드 1~3개를 추출하는 도우미다.
+_STATIC_PROMPT_PREFIX = """당신은 한국어로 입력된 자영업자 발화를 읽고 메뉴 홍보 게시물에 사용할 메뉴 관련 키워드 1~3개를 추출하는 도우미다.
 
 규칙:
 - 출력은 JSON 객체 텍스트만 반환한다.
@@ -171,9 +171,15 @@ _PROMPT_TEMPLATE = """당신은 한국어로 입력된 자영업자 발화를 �
 입력: 비 오는 날이라 막걸리랑 파전 생각나서 오늘은 이 조합 추천하고 싶어요
 출력: {{"keywords": ["막걸리", "파전"]}}
 
-입력: {utterance}
-출력:
 """
+
+
+def build_keyword_extraction_static_prefix() -> str:
+    return _STATIC_PROMPT_PREFIX
+
+
+def build_keyword_extraction_dynamic_suffix(utterance: str) -> str:
+    return f"입력: {utterance.strip()}\n출력:"
 
 
 class KeywordExtractionUnavailableError(RuntimeError):
@@ -238,7 +244,7 @@ class KeywordExtractionService:
                 "Keyword extraction model is disabled."
             )
 
-        prompt = _PROMPT_TEMPLATE.format(utterance=utterance.strip())
+        messages = self._build_messages(utterance)
         started_at = time.perf_counter()
 
         logger.info(
@@ -264,7 +270,7 @@ class KeywordExtractionService:
         )
 
         try:
-            raw_output = await self._generate_keywords(prompt)
+            raw_output = await self._generate_keywords(messages)
         except TimeoutError as exc:
             logger.warning(
                 "Keyword extraction timed out while waiting for llama-server completion.",
@@ -321,15 +327,29 @@ class KeywordExtractionService:
         )
         return result
 
-    def _build_request_payload(self, prompt: str, include_response_format: bool) -> dict[str, Any]:
+    def _build_messages(self, utterance: str) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": "Return only a JSON object with a keywords field.",
+            },
+            {
+                "role": "user",
+                "content": build_keyword_extraction_static_prefix(),
+            },
+            {
+                "role": "user",
+                "content": build_keyword_extraction_dynamic_suffix(utterance),
+            },
+        ]
+
+    def _build_request_payload(
+        self,
+        messages: list[dict[str, str]],
+        include_response_format: bool,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "Return only a JSON object with a keywords field.",
-                },
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "temperature": self.temperature,
             "top_p": self.top_p,
             "max_tokens": self.max_tokens,
@@ -367,11 +387,11 @@ class KeywordExtractionService:
 
     async def _post_chat_completion(
         self,
-        prompt: str,
+        messages: list[dict[str, str]],
         *,
         include_response_format: bool,
     ) -> httpx.Response:
-        payload = self._build_request_payload(prompt, include_response_format)
+        payload = self._build_request_payload(messages, include_response_format)
         return await self._remote_client.post_chat_completion(payload)
 
     async def _check_server_connection(self) -> None:
@@ -418,7 +438,7 @@ class KeywordExtractionService:
         body = response.text.lower()
         return "response_format" in body or "json_object" in body or "schema" in body
 
-    async def _generate_keywords(self, prompt: str) -> str:
+    async def _generate_keywords(self, messages: list[dict[str, str]]) -> str:
         if not self.base_url:
             raise KeywordExtractionUnavailableError(
                 "Keyword extraction server base URL is not configured."
@@ -444,7 +464,7 @@ class KeywordExtractionService:
         response: httpx.Response | None = None
         try:
             response = await self._post_chat_completion(
-                prompt,
+                messages,
                 include_response_format=True,
             )
             if self._is_response_format_unsupported(response):
@@ -461,7 +481,7 @@ class KeywordExtractionService:
                     ),
                 )
                 response = await self._post_chat_completion(
-                    prompt,
+                    messages,
                     include_response_format=False,
                 )
             response.raise_for_status()

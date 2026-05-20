@@ -1,5 +1,4 @@
 import asyncio
-import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -137,8 +136,8 @@ def test_final_edit_preserves_existing_final_keywords(
 
     assert edit_response.status_code == 200
     saved = fake_redis_sync.hgetall(session_key(session_id))
-    assert saved["final_keyword:1"] == "1042:signature menu"
-    assert saved["final_keyword:2"] == "2051:cozy table"
+    assert saved["final_keyword:1"] == "signature menu"
+    assert saved["final_keyword:2"] == "cozy table"
 
 
 def test_final_edit_reuses_owner_persona_from_session_context(
@@ -283,6 +282,7 @@ def test_initialize_final_edit_service_marks_unavailable_on_upscaler_error(
 ) -> None:
     startup_app = FastAPI()
 
+    monkeypatch.setattr(settings, "FINAL_EDIT_ENABLE_UPSCALE", True)
     monkeypatch.setattr("app.bootstrap.import_cv2", lambda: object())
 
     def fail_upscaler():
@@ -376,6 +376,7 @@ def test_final_edit_service_marks_planner_fallback_on_planner_error(
         uploader=uploader,
         temp_root=tmp_path,
         planner_client=FailingPlannerClient(),
+        upscale_enabled=True,
     )
 
     result = _run_service(
@@ -401,12 +402,13 @@ def test_final_edit_service_marks_planner_fallback_on_planner_error(
     assert result.debug_fields["debug:planner_response_received"] == "false"
     assert result.debug_fields["debug:planned_indexes"] == ""
     assert result.debug_fields["debug:upscale_enabled"] == "true"
-    assert result.debug_fields["debug:tools:1"] == "color_grading,upscale"
-    assert result.debug_fields["debug:executed_tools:1"] == "color_grading,upscale"
+    assert result.debug_fields["debug:tools:1"] == ""
+    assert result.debug_fields["debug:executed_tools:1"] == ""
     assert result.debug_fields["debug:plan_source:1"] == "planner_fallback"
-    assert result.debug_fields["debug:upload_source_kind:1"] == "edited"
-    assert "edited-000.png" in result.debug_fields["debug:output_path:1"]
-    assert uploader.source_paths[0].endswith("edited-000.png")
+    assert result.debug_fields["debug:filter_applied:1"] == "false"
+    assert result.debug_fields["debug:upload_source_kind:1"] == "original_fallback"
+    assert result.debug_fields["debug:output_path:1"].endswith("draft-001.png")
+    assert uploader.source_paths[0].endswith("draft-001.png")
 
 
 def test_final_edit_service_records_planner_failure_details(
@@ -503,6 +505,51 @@ def test_final_edit_service_marks_image_fallback_when_agent_falls_back(
     assert uploader.source_paths[0].endswith("draft-001.png")
 
 
+def test_final_edit_service_falls_back_when_background_blur_plan_is_requested(
+    tmp_path: Path,
+    service_loop,
+) -> None:
+    uploader = CapturingFinalUploader()
+    service = FinalEditService(
+        downloader=StubDraftDownloader(),
+        uploader=uploader,
+        temp_root=tmp_path,
+        planner_client=FakePlannerClient(
+            [
+                ImageEditPlan(
+                    image_index=0,
+                    content="cake",
+                    strategy="blur background",
+                    tools=["background_blur"],
+                    params={"background_blur": {"blur_radius": 4}},
+                )
+            ]
+        ),
+        upscale_enabled=False,
+    )
+
+    result = _run_service(
+        service_loop,
+        service.edit_and_upload(
+            session_id="session-background-blur-fallback-1",
+            drafts=["/ai-drafts/session-background-blur-fallback-1/draft-001.png"],
+            context=FinalEditSessionContext(
+                caption="dessert showcase",
+                keywords=["cake"],
+            ),
+        ),
+    )
+
+    assert result.status == "PHOTO_EDITED"
+    assert result.debug_fields is not None
+    assert result.debug_fields["debug:tools:1"] == "background_blur"
+    assert result.debug_fields["debug:executed_tools:1"] == ""
+    assert result.debug_fields["debug:image_fallback:1"] == "true"
+    assert result.debug_fields["debug:image_failure:1"] == "plan_validation_failed:ValueError"
+    assert result.debug_fields["debug:upload_source_kind:1"] == "original_fallback"
+    assert uploader.source_paths[0].endswith("draft-001.png")
+
+
 def test_final_edit_service_marks_edited_upload_source_when_agent_succeeds(
     tmp_path: Path,
     service_loop,
@@ -526,6 +573,7 @@ def test_final_edit_service_marks_edited_upload_source_when_agent_succeeds(
                 )
             ]
         ),
+        upscale_enabled=True,
     )
 
     result = _run_service(
@@ -702,7 +750,7 @@ def test_final_edit_service_falls_back_only_failed_images_when_any_planner_call_
     assert result.debug_fields["debug:planned_indexes"] == "0,2"
     assert result.debug_fields["debug:tools:1"] == "denoise"
     assert result.debug_fields["debug:plan_source:2"] == "planner_fallback"
-    assert result.debug_fields["debug:tools:2"] == "color_grading"
+    assert result.debug_fields["debug:tools:2"] == ""
     assert result.debug_fields["debug:tools:3"] == "sharpen"
     assert result.debug_fields["debug:planner_failure_image_index"] == "1"
     assert result.debug_fields["debug:planner_failure_type:2"] == "RuntimeError"
@@ -735,6 +783,7 @@ def test_final_edit_service_applies_crop_and_records_debug_fields(
                 )
             ]
         ),
+        upscale_enabled=True,
     )
 
     result = _run_service(
@@ -751,10 +800,11 @@ def test_final_edit_service_applies_crop_and_records_debug_fields(
 
     assert result.status == "PHOTO_EDITED"
     assert result.debug_fields is not None
-    assert result.debug_fields["debug:tools:1"] == "crop,color_grading,upscale"
-    assert result.debug_fields["debug:executed_tools:1"] == "crop,color_grading,upscale"
+    assert result.debug_fields["debug:tools:1"] == "crop,color_grading,filter,upscale"
+    assert result.debug_fields["debug:executed_tools:1"] == "crop,color_grading,filter,upscale"
     assert result.debug_fields["debug:crop_applied:1"] == "true"
     assert result.debug_fields["debug:crop_reason:1"] == "applied"
+    assert result.debug_fields["debug:selected_filter:1"] == "Clarendon"
     assert float(result.debug_fields["debug:crop_output_ratio:1"]) == pytest.approx(1.0)
 
 
@@ -782,6 +832,7 @@ def test_final_edit_service_reorders_tools_before_execution(
                 )
             ]
         ),
+        upscale_enabled=True,
     )
 
     result = _run_service(
@@ -826,6 +877,7 @@ def test_final_edit_service_deduplicates_upscale_to_single_execution(
                 )
             ]
         ),
+        upscale_enabled=True,
     )
 
     result = _run_service(
@@ -873,12 +925,12 @@ def test_final_edit_service_uses_upscale_only_when_plan_is_missing(
     assert result.status == "PHOTO_EDITED"
     assert result.debug_fields is not None
     assert result.debug_fields["debug:plan_source:1"] == "plan_missing_for_image"
-    assert result.debug_fields["debug:tools:1"] == "color_grading,upscale"
-    assert result.debug_fields["debug:executed_tools:1"] == "color_grading,upscale"
-    assert result.debug_fields["debug:upload_source_kind:1"] == "edited"
+    assert result.debug_fields["debug:tools:1"] == ""
+    assert result.debug_fields["debug:executed_tools:1"] == ""
+    assert result.debug_fields["debug:upload_source_kind:1"] == "original_fallback"
 
 
-def test_final_edit_service_inserts_color_grading_before_upscale_only_plan(
+def test_final_edit_service_inserts_filter_before_upscale_only_plan(
     tmp_path: Path,
     service_loop,
 ) -> None:
@@ -898,6 +950,7 @@ def test_final_edit_service_inserts_color_grading_before_upscale_only_plan(
                 )
             ]
         ),
+        upscale_enabled=True,
     )
 
     result = _run_service(
@@ -914,11 +967,14 @@ def test_final_edit_service_inserts_color_grading_before_upscale_only_plan(
 
     assert result.status == "PHOTO_EDITED"
     assert result.debug_fields is not None
-    assert result.debug_fields["debug:tools:1"] == "color_grading,upscale"
-    assert result.debug_fields["debug:executed_tools:1"] == "color_grading,upscale"
+    assert result.debug_fields["debug:tools:1"] == "filter,upscale"
+    assert result.debug_fields["debug:executed_tools:1"] == "filter,upscale"
+    assert result.debug_fields["debug:selected_filter:1"] == "Clarendon"
+    assert result.debug_fields["debug:selected_filter_backend:1"] == "pilgram2"
+    assert result.debug_fields["debug:selected_filter_callable:1"] == "clarendon"
 
 
-def test_final_edit_service_inserts_color_grading_between_denoise_and_upscale(
+def test_final_edit_service_inserts_filter_between_denoise_and_upscale(
     tmp_path: Path,
     service_loop,
 ) -> None:
@@ -941,6 +997,7 @@ def test_final_edit_service_inserts_color_grading_between_denoise_and_upscale(
                 )
             ]
         ),
+        upscale_enabled=True,
     )
 
     result = _run_service(
@@ -957,8 +1014,11 @@ def test_final_edit_service_inserts_color_grading_between_denoise_and_upscale(
 
     assert result.status == "PHOTO_EDITED"
     assert result.debug_fields is not None
-    assert result.debug_fields["debug:tools:1"] == "denoise,color_grading,upscale"
-    assert result.debug_fields["debug:executed_tools:1"] == "denoise,color_grading,upscale"
+    assert result.debug_fields["debug:tools:1"] == "denoise,filter,upscale"
+    assert result.debug_fields["debug:executed_tools:1"] == "denoise,filter,upscale"
+    assert result.debug_fields["debug:selected_filter:1"] == "Clarendon"
+    assert result.debug_fields["debug:selected_filter_backend:1"] == "pilgram2"
+    assert result.debug_fields["debug:selected_filter_callable:1"] == "clarendon"
 
 
 def test_final_edit_service_marks_persona_preset_fallback_for_unknown_persona(
@@ -1024,8 +1084,8 @@ def test_final_edit_service_omits_upscale_in_fallback_when_disabled(
     assert result.status == "PHOTO_EDITED"
     assert result.debug_fields is not None
     assert result.debug_fields["debug:upscale_enabled"] == "false"
-    assert result.debug_fields["debug:tools:1"] == "color_grading"
-    assert result.debug_fields["debug:executed_tools:1"] == "color_grading"
+    assert result.debug_fields["debug:tools:1"] == ""
+    assert result.debug_fields["debug:executed_tools:1"] == ""
 
 
 def test_final_edit_service_strips_upscale_from_planner_plan_when_disabled(
@@ -1075,7 +1135,7 @@ def test_final_edit_service_strips_upscale_from_planner_plan_when_disabled(
     assert result.debug_fields["debug:executed_tools:1"] == "denoise"
 
 
-def test_final_edit_service_records_aesthetic_tone_debug_fields(
+def test_final_edit_service_records_selected_filter_debug_fields(
     tmp_path: Path,
     service_loop,
 ) -> None:
@@ -1090,18 +1150,8 @@ def test_final_edit_service_records_aesthetic_tone_debug_fields(
                     image_index=0,
                     content="케이크",
                     strategy="aesthetic tone gap 보정",
-                    tools=["color_grading"],
-                    params={
-                        "color_grading": {
-                            "contrast": 12,
-                            "highlights": 8,
-                            "shadows": 5,
-                            "vibrance": 9,
-                            "saturation": 10,
-                            "temperature": "warm",
-                            "tone_curve_shadow_lift": 7,
-                        }
-                    },
+                    tools=["filter"],
+                    params={"filter": {"filter_name": "Valencia"}},
                 )
             ]
         ),
@@ -1110,8 +1160,8 @@ def test_final_edit_service_records_aesthetic_tone_debug_fields(
     result = _run_service(
         service_loop,
         service.edit_and_upload(
-            session_id="session-aesthetic-tone-1",
-            drafts=["/ai-drafts/session-aesthetic-tone-1/draft-001.png"],
+            session_id="session-selected-filter-1",
+            drafts=["/ai-drafts/session-selected-filter-1/draft-001.png"],
             context=FinalEditSessionContext(
                 owner_persona="aesthetic",
                 caption="톤 보정",
@@ -1122,18 +1172,9 @@ def test_final_edit_service_records_aesthetic_tone_debug_fields(
 
     assert result.status == "PHOTO_EDITED"
     assert result.debug_fields is not None
-    assert result.debug_fields["debug:aesthetic_tone_applied:1"] == "true"
-    assert "debug:aesthetic_spotlight_protection:1" in result.debug_fields
-    current_tone = json.loads(result.debug_fields["debug:aesthetic_current_tone:1"])
-    target_tone = json.loads(result.debug_fields["debug:aesthetic_target_tone:1"])
-    tolerance = json.loads(result.debug_fields["debug:aesthetic_tolerance:1"])
-    gap = json.loads(result.debug_fields["debug:aesthetic_tone_gap:1"])
-    skip = json.loads(result.debug_fields["debug:aesthetic_tone_skip:1"])
-    applied_params = json.loads(result.debug_fields["debug:aesthetic_applied_params:1"])
-    assert "brightness" in current_tone
-    assert "highlight_area_ratio" in current_tone
-    assert "brightness" in target_tone
-    assert "brightness" in tolerance
-    assert "brightness" in gap
-    assert "brightness" in skip
-    assert "temperature_strength" in applied_params
+    assert result.debug_fields["debug:filter_applied:1"] == "true"
+    assert result.debug_fields["debug:selected_filter:1"] == "Valencia"
+    assert result.debug_fields["debug:selected_filter_backend:1"] == "pilgram2"
+    assert result.debug_fields["debug:selected_filter_callable:1"] == "valencia"
+    assert result.debug_fields["debug:filter_source:1"] == "planner"
+    assert result.debug_fields["debug:upload_source_kind:1"] == "edited"

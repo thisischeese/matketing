@@ -72,6 +72,16 @@ class StubDraftUploader:
 
 
 class StubFrameExtractor:
+    last_profile = {
+        "extract_profile_decode_wait_ms": 11,
+        "extract_profile_normalize_ms": 22,
+        "extract_profile_inference_ms": 33,
+        "extract_profile_candidate_collect_ms": 4,
+        "extract_profile_segment_select_ms": 5,
+        "extract_profile_batches": 1,
+        "extract_profile_sampled_frames": 3,
+    }
+
     def extract_top_k_frames(self, video_path: Path, k: int):
         return [
             (np.zeros((8, 8, 3), dtype=np.uint8), float(5 - index))
@@ -222,6 +232,13 @@ async def test_frame_extraction_emits_stage_logs(tmp_path: Path) -> None:
     assert 'frame_score="5.000000"' in output
     assert 'frame_score="4.000000"' in output
     assert 'frame_score="3.000000"' in output
+    assert "extract_profile_decode_wait_ms=11" in output
+    assert "extract_profile_normalize_ms=22" in output
+    assert "extract_profile_inference_ms=33" in output
+    assert "extract_profile_candidate_collect_ms=4" in output
+    assert "extract_profile_segment_select_ms=5" in output
+    assert "extract_profile_batches=1" in output
+    assert "extract_profile_sampled_frames=3" in output
     assert output.count('event="frame_extraction.upload_frame.started"') == 3
     assert output.count('event="frame_extraction.upload_frame.completed"') == 3
     assert 'frame_shape="8x8x3"' in output
@@ -300,14 +317,12 @@ async def test_final_edit_emits_stage_logs(tmp_path: Path) -> None:
                     image_index=0,
                     content="케이크",
                     strategy="디노이즈 후 샤프닝",
-                    tools=["denoise", "sharpen"],
-                    params={
-                        "denoise": {"strength": 0.4},
-                        "sharpen": {"strength": 0.3},
-                    },
+                    tools=["filter"],
+                    params={"filter": {"filter_name": "Valencia"}},
                 )
             ]
         ),
+        upscale_enabled=True,
     )
 
     with capture_app_logs() as stream:
@@ -334,6 +349,8 @@ async def test_final_edit_emits_stage_logs(tmp_path: Path) -> None:
     assert 'event="final_edit.tool.started"' in output
     assert 'tool_order=1' in output
     assert 'tool_params=' in output
+    assert 'Valencia' in output
+    assert 'valencia' in output
     assert 'input_shape="16x16x3"' in output
     assert 'event="final_edit.tool.completed"' in output
     assert 'output_shape="32x32x3"' in output

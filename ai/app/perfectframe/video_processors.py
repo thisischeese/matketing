@@ -8,10 +8,10 @@ from contextlib import contextmanager
 import math
 from pathlib import Path
 
-from app.perfectframe.schemas import Image, Images
+from app.perfectframe.schemas import Images
 
-TARGET_SAMPLE_FPS = 30
-DEFAULT_FALLBACK_FPS = 30
+TARGET_SAMPLE_FPS = 5
+DEFAULT_FALLBACK_FPS = 5
 MAX_REASONABLE_FPS = 240
 
 
@@ -67,7 +67,6 @@ class OpenCVVideo(VideoProcessor):
             frame_count_raw = cls._get_video_property(video, cv2.CAP_PROP_FRAME_COUNT)
             frame_count = cls._normalize_frame_count(frame_count_raw)
             sampling_step = cls._get_sampling_step(fps_effective)
-            scan_mode = "metadata" if frame_count is not None else "sequential_fallback"
 
             cls.last_scan_metadata = {
                 "video_fps_raw": round(fps_raw, 3) if fps_raw is not None else None,
@@ -77,53 +76,14 @@ class OpenCVVideo(VideoProcessor):
                 else None,
                 "video_frame_count_effective": frame_count,
                 "video_sampling_step": sampling_step,
-                "video_frame_scan_mode": scan_mode,
+                "video_frame_scan_mode": "sequential",
             }
-
-            if frame_count is not None:
-                yield from cls._yield_sampled_frames_from_metadata(
-                    video,
-                    frame_count,
-                    sampling_step,
-                    frames_batch_size,
-                )
-                return
 
             yield from cls._yield_sampled_frames_sequentially(
                 video,
                 sampling_step,
                 frames_batch_size,
             )
-
-    @classmethod
-    def _read_next_frame(cls, video, frame_index: int) -> Image | None:
-        cv2 = _import_cv2()
-        video.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-        success, frame = video.read()
-        if not success:
-            return None
-        return frame
-
-    @classmethod
-    def _yield_sampled_frames_from_metadata(
-        cls,
-        video,
-        total_frames: int,
-        sampling_step: int,
-        frames_batch_size: int,
-    ) -> Generator[Images, None, None]:
-        frames_batch: Images = []
-        for frame_index in range(0, total_frames, sampling_step):
-            frame = cls._read_next_frame(video, frame_index)
-            if frame is None:
-                continue
-            frames_batch.append(frame)
-            if len(frames_batch) == frames_batch_size:
-                yield frames_batch
-                frames_batch = []
-
-        if frames_batch:
-            yield frames_batch
 
     @classmethod
     def _yield_sampled_frames_sequentially(
@@ -151,7 +111,7 @@ class OpenCVVideo(VideoProcessor):
 
     @staticmethod
     def _get_sampling_step(frame_rate: int) -> int:
-        # Cap sampling at 30 frames per second while keeping lower-FPS videos intact.
+        # Cap sampling at 5 frames per second while keeping lower-FPS videos intact.
         return max(1, round(frame_rate / TARGET_SAMPLE_FPS))
 
     @staticmethod

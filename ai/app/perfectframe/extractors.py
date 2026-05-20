@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import numpy as np
 
@@ -26,6 +27,7 @@ class BestFrameExtractor:
         self._image_processor = image_processor
         self._video_processor = video_processor
         self._image_evaluator = image_evaluator
+        self.last_profile: dict[str, int | float] = {}
 
     def extract_top_k_frames(
         self,
@@ -40,31 +42,76 @@ class BestFrameExtractor:
         """
 
         if k <= 0:
+            self.last_profile = {}
             return []
 
         candidates: list[tuple[float, Image]] = []
-        frames_batch_generator = self._video_processor.get_next_frames(
+        frames_batch_generator = iter(self._video_processor.get_next_frames(
             video_path,
             self._config.batch_size,
-        )
-        for frames in frames_batch_generator:
+        ))
+        decode_wait_ms = 0.0
+        normalize_ms = 0.0
+        inference_ms = 0.0
+        candidate_collect_ms = 0.0
+        batch_count = 0
+        sampled_frame_count = 0
+
+        while True:
+            batch_wait_started_at = time.perf_counter()
+            try:
+                frames = next(frames_batch_generator)
+            except StopIteration:
+                decode_wait_ms += (time.perf_counter() - batch_wait_started_at) * 1000
+                break
+            decode_wait_ms += (time.perf_counter() - batch_wait_started_at) * 1000
             if not frames:
                 continue
+            batch_count += 1
+            sampled_frame_count += len(frames)
+
+            normalize_started_at = time.perf_counter()
             normalized_images = self._image_processor.normalize_images(
                 frames,
                 self._config.input_size,
             )
+            normalize_ms += (time.perf_counter() - normalize_started_at) * 1000
+
+            inference_started_at = time.perf_counter()
             scores = self._image_evaluator.evaluate_images(normalized_images)
+            inference_ms += (time.perf_counter() - inference_started_at) * 1000
+
+            collect_started_at = time.perf_counter()
             for frame, score in zip(frames, scores):
                 candidates.append((float(score), frame))
+            candidate_collect_ms += (time.perf_counter() - collect_started_at) * 1000
 
         if not candidates:
+            self.last_profile = {
+                "extract_profile_decode_wait_ms": int(decode_wait_ms),
+                "extract_profile_normalize_ms": int(normalize_ms),
+                "extract_profile_inference_ms": int(inference_ms),
+                "extract_profile_candidate_collect_ms": int(candidate_collect_ms),
+                "extract_profile_segment_select_ms": 0,
+                "extract_profile_batches": batch_count,
+                "extract_profile_sampled_frames": sampled_frame_count,
+            }
             return []
         if len(candidates) <= k:
+            self.last_profile = {
+                "extract_profile_decode_wait_ms": int(decode_wait_ms),
+                "extract_profile_normalize_ms": int(normalize_ms),
+                "extract_profile_inference_ms": int(inference_ms),
+                "extract_profile_candidate_collect_ms": int(candidate_collect_ms),
+                "extract_profile_segment_select_ms": 0,
+                "extract_profile_batches": batch_count,
+                "extract_profile_sampled_frames": sampled_frame_count,
+            }
             return [(frame, score) for score, frame in candidates]
 
         n = len(candidates)
         selected: list[tuple[Image, float]] = []
+        segment_select_started_at = time.perf_counter()
         for index in range(k):
             lo = (index * n) // k
             hi = ((index + 1) * n) // k
@@ -73,6 +120,16 @@ class BestFrameExtractor:
                 continue
             best_score, best_frame = max(segment, key=lambda item: item[0])
             selected.append((best_frame, best_score))
+        segment_select_ms = (time.perf_counter() - segment_select_started_at) * 1000
+        self.last_profile = {
+            "extract_profile_decode_wait_ms": int(decode_wait_ms),
+            "extract_profile_normalize_ms": int(normalize_ms),
+            "extract_profile_inference_ms": int(inference_ms),
+            "extract_profile_candidate_collect_ms": int(candidate_collect_ms),
+            "extract_profile_segment_select_ms": int(segment_select_ms),
+            "extract_profile_batches": batch_count,
+            "extract_profile_sampled_frames": sampled_frame_count,
+        }
         return selected
 
     def extract_best_frame(self, video_path: Path) -> tuple[Image, float] | None:

@@ -1,0 +1,67 @@
+[
+  {
+    "name": "Clarendon",
+    "description": "High-contrast, vibrant filter for energetic outdoor scenes, colorful food, and moments that should feel lively and timeless.",
+    "pilgram2_name": "clarendon"
+  },
+  {
+    "name": "Juno",
+    "description": "Warm, modern filter that flatters portraits, fashion, and street scenes with red or orange accents.",
+    "pilgram2_name": "juno"
+  },
+  {
+    "name": "Lark",
+    "description": "Bright, airy, cool-toned filter for landscapes, beaches, water, greenery, and calm open scenes.",
+    "pilgram2_name": "lark"
+  },
+  {
+    "name": "Aden",
+    "description": "Soft, pastel filter for peaceful portraits, close-ups, and gentle, dreamy moods.",
+    "pilgram2_name": "aden"
+  },
+  {
+    "name": "Valencia",
+    "description": "Warm golden filter for cozy cafes, interiors, sunsets, wood textures, and nostalgic atmosphere.",
+    "pilgram2_name": "valencia"
+  },
+  {
+    "name": "Rise",
+    "description": "Soft warm morning-light filter for welcoming outdoor portraits and sun-kissed scenes.",
+    "pilgram2_name": "rise"
+  },
+  {
+    "name": "Gingham",
+    "description": "Faded minimalist filter for flat lays, still life, simple compositions, and washed, nostalgic moods.",
+    "pilgram2_name": "gingham"
+  },
+  {
+    "name": "Ludwig",
+    "description": "Clean, sharp filter for architecture, geometric composition, editorial fashion, and red-accent subjects.",
+    "pilgram2_name": "ludwig"
+  },
+  {
+    "name": "Sierra",
+    "description": "Subtle artistic filter for forests, nature, and earthy scenes that should feel refined and painterly.",
+    "pilgram2_name": "sierra"
+  },
+  {
+    "name": "Mayfair",
+    "description": "Bright flattering filter for selfies, group photos, and polished social portraits.",
+    "pilgram2_name": "mayfair"
+  },
+  {
+    "name": "X-Pro II",
+    "description": "Bold dramatic filter for edgy, vintage, or low-energy photos that need a stronger stylized look.",
+    "pilgram2_name": "xpro2"
+  },
+  {
+    "name": "Lo-Fi",
+    "description": "Saturated, shadow-heavy filter for nightlife, neon lights, rich food shots, and bold urban energy.",
+    "pilgram2_name": "lofi"
+  },
+  {
+    "name": "Reyes",
+    "description": "Muted clean filter for lifestyle, morning routines, soft whites, and airy minimalist feeds.",
+    "pilgram2_name": "reyes"
+  }
+]

@@ -1,21 +1,15 @@
+from pathlib import Path
+
 import pytest
 
 from app.core.config import (
     DEFAULT_CAPTION_MODEL_HEALTH_ENDPOINT,
-    DEFAULT_CAPTION_MODEL_HF_FILENAME,
-    DEFAULT_CAPTION_MODEL_HF_REPO_ID,
-    DEFAULT_CAPTION_MODEL_HOST_DIR,
-    DEFAULT_CAPTION_MODEL_PATH,
     DEFAULT_CAPTION_MODEL_SERVER_PORT,
     DEFAULT_CAPTION_MODEL_TIMEOUT_SECONDS,
     DEFAULT_CANONICAL_KEYWORD_EMBEDDING_DIM,
     DEFAULT_CANONICAL_KEYWORD_EMBEDDING_MODEL_CACHE_DIR,
     DEFAULT_CANONICAL_KEYWORD_EMBEDDING_MODEL_NAME,
     DEFAULT_KEYWORD_MODEL_HEALTH_ENDPOINT,
-    DEFAULT_KEYWORD_MODEL_HF_FILENAME,
-    DEFAULT_KEYWORD_MODEL_HF_REPO_ID,
-    DEFAULT_KEYWORD_MODEL_HOST_DIR,
-    DEFAULT_KEYWORD_MODEL_PATH,
     DEFAULT_KEYWORD_MODEL_SERVER_PORT,
     DEFAULT_KEYWORD_MODEL_TIMEOUT_SECONDS,
     Settings,
@@ -44,12 +38,6 @@ def env_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KEYWORD_MODEL_TEMPERATURE", "0.2")
     monkeypatch.setenv("KEYWORD_MODEL_TOP_P", "0.85")
     monkeypatch.setenv("KEYWORD_MODEL_ENABLED", "true")
-    monkeypatch.setenv("KEYWORD_MODEL_HOST_DIR", "./.models/custom-keyword")
-    monkeypatch.setenv("KEYWORD_MODEL_HF_REPO_ID", "Qwen/custom-keyword")
-    monkeypatch.setenv("KEYWORD_MODEL_HF_FILENAME", "keyword.gguf")
-    monkeypatch.setenv("KEYWORD_MODEL_SERVER_PORT", "8101")
-    monkeypatch.setenv("KEYWORD_MODEL_CTX_SIZE", "3072")
-    monkeypatch.setenv("KEYWORD_MODEL_GPU_LAYERS", "16")
     monkeypatch.setenv("CAPTION_MODEL_BASE_URL", "http://caption-server:8002")
     monkeypatch.setenv("CAPTION_MODEL_NAME", "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-AWQ")
     monkeypatch.setenv("CAPTION_MODEL_CHAT_ENDPOINT", "/v1/chat/completions")
@@ -59,12 +47,6 @@ def env_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CAPTION_MODEL_TEMPERATURE", "0.6")
     monkeypatch.setenv("CAPTION_MODEL_TOP_P", "0.88")
     monkeypatch.setenv("CAPTION_MODEL_ENABLED", "true")
-    monkeypatch.setenv("CAPTION_MODEL_HOST_DIR", "./.models/custom-caption")
-    monkeypatch.setenv("CAPTION_MODEL_HF_REPO_ID", "Qwen/custom-caption")
-    monkeypatch.setenv("CAPTION_MODEL_HF_FILENAME", "caption.gguf")
-    monkeypatch.setenv("CAPTION_MODEL_SERVER_PORT", "8102")
-    monkeypatch.setenv("CAPTION_MODEL_CTX_SIZE", "4096")
-    monkeypatch.setenv("CAPTION_MODEL_GPU_LAYERS", "24")
     monkeypatch.setenv("FINAL_EDIT_ENABLE_UPSCALE", "true")
     monkeypatch.setenv("CANONICAL_KEYWORD_RESOLVER_ENABLED", "true")
     monkeypatch.setenv(
@@ -107,13 +89,6 @@ def test_settings_parses_infra_fields(env_setup: None) -> None:
     assert settings.keyword_model_client.top_p == 0.85
     assert settings.keyword_model_client.enabled is True
 
-    assert settings.keyword_model_server.host_dir == "./.models/custom-keyword"
-    assert settings.keyword_model_server.hf_repo_id == "Qwen/custom-keyword"
-    assert settings.keyword_model_server.hf_filename == "keyword.gguf"
-    assert settings.keyword_model_server.server_port == 8101
-    assert settings.keyword_model_server.ctx_size == 3072
-    assert settings.keyword_model_server.gpu_layers == 16
-
     assert settings.caption_model_client.base_url == "http://caption-server:8002"
     assert (
         settings.caption_model_client.model_name
@@ -127,13 +102,6 @@ def test_settings_parses_infra_fields(env_setup: None) -> None:
     assert settings.caption_model_client.top_p == 0.88
     assert settings.caption_model_client.enabled is True
     assert settings.FINAL_EDIT_ENABLE_UPSCALE is True
-
-    assert settings.caption_model_server.host_dir == "./.models/custom-caption"
-    assert settings.caption_model_server.hf_repo_id == "Qwen/custom-caption"
-    assert settings.caption_model_server.hf_filename == "caption.gguf"
-    assert settings.caption_model_server.server_port == 8102
-    assert settings.caption_model_server.ctx_size == 4096
-    assert settings.caption_model_server.gpu_layers == 24
 
     assert settings.CANONICAL_KEYWORD_RESOLVER_ENABLED is True
     assert (
@@ -254,22 +222,10 @@ def test_s3_configured_when_required_fields_exist(env_setup: None) -> None:
 
 
 def test_model_defaults_resolve_without_env(env_setup: None) -> None:
-    assert DEFAULT_KEYWORD_MODEL_PATH.name == "model.gguf"
-    assert DEFAULT_KEYWORD_MODEL_PATH.parent.name == "q4_k_m"
-    assert DEFAULT_KEYWORD_MODEL_PATH.parent.parent.name == "exaone-3.5-7.8b-instruct"
-    assert DEFAULT_KEYWORD_MODEL_HOST_DIR == "./.models/keyword/exaone-3.5-7.8b-instruct/q4_k_m"
-    assert DEFAULT_KEYWORD_MODEL_HF_REPO_ID == "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF"
-    assert DEFAULT_KEYWORD_MODEL_HF_FILENAME == "EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf"
     assert DEFAULT_KEYWORD_MODEL_SERVER_PORT == 8001
     assert DEFAULT_KEYWORD_MODEL_TIMEOUT_SECONDS == 60.0
     assert DEFAULT_KEYWORD_MODEL_HEALTH_ENDPOINT == "/health"
 
-    assert DEFAULT_CAPTION_MODEL_PATH.name == "model.gguf"
-    assert DEFAULT_CAPTION_MODEL_PATH.parent.name == "q4_k_m"
-    assert DEFAULT_CAPTION_MODEL_PATH.parent.parent.name == "exaone-4.0-32b"
-    assert DEFAULT_CAPTION_MODEL_HOST_DIR == "./.models/caption/exaone-4.0-32b/q4_k_m"
-    assert DEFAULT_CAPTION_MODEL_HF_REPO_ID == "LGAI-EXAONE/EXAONE-4.0-32B-GGUF"
-    assert DEFAULT_CAPTION_MODEL_HF_FILENAME == "EXAONE-4.0-32B-Q4_K_M.gguf"
     assert DEFAULT_CAPTION_MODEL_SERVER_PORT == 8002
     assert DEFAULT_CAPTION_MODEL_TIMEOUT_SECONDS == 600.0
     assert DEFAULT_CAPTION_MODEL_HEALTH_ENDPOINT == "/health"
@@ -401,6 +357,18 @@ def test_model_tunable_env_vars_are_applied(monkeypatch: pytest.MonkeyPatch) -> 
     assert settings.caption_model_client.temperature == 0.55
     assert settings.caption_model_client.top_p == 0.82
     assert settings.caption_model_client.enabled is False
+
+
+def test_final_edit_model_name_matches_env_example(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required_postgres(monkeypatch)
+    monkeypatch.delenv("FINAL_EDIT_MODEL_NAME", raising=False)
+
+    settings = Settings(_env_file=None)
+    env_example = Path(__file__).resolve().parents[1] / ".env.example"
+    assert (
+        f"FINAL_EDIT_MODEL_NAME={settings.FINAL_EDIT_MODEL_NAME}"
+        in env_example.read_text(encoding="utf-8")
+    )
 
 
 def test_s3_not_configured_when_bucket_missing(monkeypatch: pytest.MonkeyPatch) -> None:
