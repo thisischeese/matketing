@@ -7,6 +7,8 @@ from app.services.caption_generation import (
     CaptionGenerationRequest,
     CaptionGenerationService,
     CaptionGenerationUnavailableError,
+    build_caption_generation_dynamic_suffix,
+    build_caption_generation_static_prefix,
 )
 
 
@@ -92,13 +94,19 @@ def test_caption_generation_service_includes_model_name_in_payload() -> None:
         model_name="exaone-text",
     )
 
+    dynamic_suffix = service._pipeline.build_dynamic_suffix(_build_request())
     payload = service._build_request_payload(
-        "prompt",
+        dynamic_suffix,
         include_response_format=False,
         strict_language=False,
     )
 
     assert payload["model"] == "exaone-text"
+    assert [message["role"] for message in payload["messages"]] == [
+        "system",
+        "user",
+        "user",
+    ]
 
 
 def test_caption_generation_service_retries_without_response_format(
@@ -216,6 +224,85 @@ def test_caption_generation_service_uses_menu_promotion_prompt_only() -> None:
     assert "menu_description: 겹겹이 결이 살아 있는 바삭한 디저트" in prompt
     assert "reference" not in prompt.lower()
     assert "selected_menu_name" not in prompt
+
+
+def test_caption_generation_static_prefix_excludes_runtime_fields() -> None:
+    prefix = build_caption_generation_static_prefix()
+
+    assert '"guide_text": "..."' in prefix
+    assert '"caption": "..."' in prefix
+    assert "owner_persona:" not in prefix
+    assert "draft_keywords:" not in prefix
+    assert "menu_description" not in prefix
+
+
+def test_caption_generation_dynamic_suffix_contains_only_runtime_fields() -> None:
+    request = _build_request()
+    suffix = build_caption_generation_dynamic_suffix(
+        owner_persona=request.owner_persona,
+        today=request.today,
+        weather_context="clear day",
+        utterance=request.utterance,
+        draft_keywords=", ".join(request.draft_keywords),
+        matched_keyword=request.matched_keyword or "",
+        menu_name=request.menu_name or "",
+        menu_description=request.menu_description or "",
+    )
+
+    assert "[filter catalog]" not in suffix
+    assert "owner_persona: warm" in suffix
+    assert "today: 2026-05-18" in suffix
+    assert "weather_context: clear day" in suffix
+    assert "draft_keywords:" in suffix
+    assert "menu_description:" in suffix
+
+
+def test_caption_generation_payload_uses_static_and_dynamic_messages() -> None:
+    service = CaptionGenerationService(base_url="http://caption-server:8002")
+    request = _build_request()
+    dynamic_suffix = service._pipeline.build_dynamic_suffix(request)
+
+    payload = service._build_request_payload(
+        dynamic_suffix,
+        include_response_format=False,
+        strict_language=False,
+    )
+
+    assert payload["messages"][0] == {
+        "role": "system",
+        "content": "guide_text와 caption만 포함한 JSON 객체 하나만 반환하세요.",
+    }
+    assert payload["messages"][1] == {
+        "role": "user",
+        "content": build_caption_generation_static_prefix(),
+    }
+    assert payload["messages"][2] == {
+        "role": "user",
+        "content": dynamic_suffix,
+    }
+
+
+def test_caption_generation_strict_retry_adds_only_final_user_message() -> None:
+    service = CaptionGenerationService(base_url="http://caption-server:8002")
+    dynamic_suffix = service._pipeline.build_dynamic_suffix(_build_request())
+
+    default_payload = service._build_request_payload(
+        dynamic_suffix,
+        include_response_format=False,
+        strict_language=False,
+    )
+    strict_payload = service._build_request_payload(
+        dynamic_suffix,
+        include_response_format=False,
+        strict_language=True,
+    )
+
+    assert strict_payload["messages"][:3] == default_payload["messages"]
+    assert len(strict_payload["messages"]) == 4
+    assert strict_payload["messages"][3] == {
+        "role": "user",
+        "content": service._build_user_retry_suffix(),
+    }
 
 
 def test_caption_generation_service_retries_with_stricter_korean_prompt(

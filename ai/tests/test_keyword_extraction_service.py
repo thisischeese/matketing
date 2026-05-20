@@ -5,6 +5,8 @@ import pytest
 from app.services.keyword_extraction import (
     KeywordExtractionService,
     KeywordExtractionUnavailableError,
+    build_keyword_extraction_dynamic_suffix,
+    build_keyword_extraction_static_prefix,
 )
 from tests.utils.session_support import _make_chat_response, _run_immediate
 
@@ -99,8 +101,15 @@ def test_keyword_extraction_service_calls_remote_server_successfully(
     service = KeywordExtractionService(base_url="http://llama-server:8000")
     calls: list[bool] = []
 
-    async def fake_post_chat_completion(prompt: str, *, include_response_format: bool):
+    async def fake_post_chat_completion(
+        messages: list[dict[str, str]],
+        *,
+        include_response_format: bool,
+    ):
         calls.append(include_response_format)
+        assert messages == service._build_messages(
+            "\uc624\ub298 \ube44\uc640\uc11c \ub9c9\uac78\ub9ac\uac00 \ub561\uae34\ub2e4"
+        )
         return _make_chat_response(
             200,
             content='{"keywords":["\\ub9c9\\uac78\\ub9ac"]}',
@@ -124,9 +133,17 @@ def test_keyword_extraction_service_includes_model_name_in_payload() -> None:
         model_name="exaone-text",
     )
 
-    payload = service._build_request_payload("prompt", include_response_format=False)
+    payload = service._build_request_payload(
+        service._build_messages("prompt"),
+        include_response_format=False,
+    )
 
     assert payload["model"] == "exaone-text"
+    assert [message["role"] for message in payload["messages"]] == [
+        "system",
+        "user",
+        "user",
+    ]
 
 
 def test_keyword_extraction_service_retries_without_response_format(
@@ -134,9 +151,15 @@ def test_keyword_extraction_service_retries_without_response_format(
 ) -> None:
     service = KeywordExtractionService(base_url="http://llama-server:8000")
     calls: list[bool] = []
+    seen_messages: list[list[dict[str, str]]] = []
 
-    async def fake_post_chat_completion(prompt: str, *, include_response_format: bool):
+    async def fake_post_chat_completion(
+        messages: list[dict[str, str]],
+        *,
+        include_response_format: bool,
+    ):
         calls.append(include_response_format)
+        seen_messages.append(messages)
         if include_response_format:
             return httpx.Response(
                 400,
@@ -160,6 +183,7 @@ def test_keyword_extraction_service_retries_without_response_format(
     )
 
     assert calls == [True, False]
+    assert seen_messages[0] == seen_messages[1]
     assert result.draft_keywords == ["\ud30c\uc804"]
 
 
@@ -168,7 +192,11 @@ def test_keyword_extraction_service_raises_on_remote_timeout(
 ) -> None:
     service = KeywordExtractionService(base_url="http://llama-server:8000")
 
-    async def fake_post_chat_completion(prompt: str, *, include_response_format: bool):
+    async def fake_post_chat_completion(
+        messages: list[dict[str, str]],
+        *,
+        include_response_format: bool,
+    ):
         raise httpx.ReadTimeout("timed out")
 
     monkeypatch.setattr(service, "_post_chat_completion", fake_post_chat_completion)
@@ -212,3 +240,43 @@ def test_keyword_extraction_service_preload_uses_health_endpoint(
     _run_immediate(service.preload())
 
     assert calls == ["http://llama-server:8000/health"]
+
+
+def test_keyword_extraction_static_prefix_excludes_runtime_utterance() -> None:
+    prefix = build_keyword_extraction_static_prefix()
+
+    assert "\uc785\ub825: {utterance}" not in prefix
+    assert "\ub9c9\uac78\ub9ac" in prefix
+    assert "\ud30c\uc804" in prefix
+
+
+def test_keyword_extraction_dynamic_suffix_contains_only_runtime_utterance() -> None:
+    suffix = build_keyword_extraction_dynamic_suffix(
+        "  \uc624\ub298 \ub9c9\uac78\ub9ac\uac00 \ub561\uae34\ub2e4  "
+    )
+
+    assert suffix == "\uc785\ub825: \uc624\ub298 \ub9c9\uac78\ub9ac\uac00 \ub561\uae34\ub2e4\n\ucd9c\ub825:"
+
+
+def test_keyword_extraction_payload_uses_static_and_dynamic_messages() -> None:
+    service = KeywordExtractionService(base_url="http://llama-server:8000")
+
+    payload = service._build_request_payload(
+        service._build_messages("\uc624\ub298 \ud30c\uc804\uc774 \uc798 \ub098\uac08 \uac83 \uac19\ub2e4"),
+        include_response_format=False,
+    )
+
+    assert payload["messages"][0] == {
+        "role": "system",
+        "content": "Return only a JSON object with a keywords field.",
+    }
+    assert payload["messages"][1] == {
+        "role": "user",
+        "content": build_keyword_extraction_static_prefix(),
+    }
+    assert payload["messages"][2] == {
+        "role": "user",
+        "content": build_keyword_extraction_dynamic_suffix(
+            "\uc624\ub298 \ud30c\uc804\uc774 \uc798 \ub098\uac08 \uac83 \uac19\ub2e4"
+        ),
+    }
