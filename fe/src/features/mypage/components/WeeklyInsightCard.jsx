@@ -7,11 +7,11 @@ const DAY_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
 const DESCRIPTION_CONTENT = {
   reach: {
     title: '가게 노출수',
-    content: `지난주 인스타그램 계정의 도달 수예요.\n수치가 높을수록 더 많은 사람에게\n가게를 알린 거예요.`,
+    content: `지난주 인스타그램 계정의 노출 수예요.\n수치가 높을수록 더 많은 사람에게\n가게가 보여진 거예요.`,
   },
   visitIntent: {
     title: '방문 관심도',
-    content: `게시물을 본 사람들이\n가게에 관심을 보인 정도예요.\n저장, 좋아요, 도달 수를 반영해\n계산해요.`,
+    content: `게시물을 본 사람들이\n가게에 관심을 보인 정도예요.\n저장, 공유, 노출 수를 반영해\n계산해요.`,
   },
 };
 
@@ -96,9 +96,9 @@ function InsightMetricItem({
   });
 
   return (
-    <div className="flex flex-col items-center gap-3 px-2">
+    <div className="flex flex-1 flex-col items-center gap-3 px-2">
       <div className="flex items-center justify-center gap-1.5">
-        <h3 className="text-[20px] font-semibold tracking-tight text-accent-100">
+        <h3 className="text-[16px] font-semibold tracking-tight text-accent-100">
           {title}
         </h3>
 
@@ -114,22 +114,21 @@ function InsightMetricItem({
         </button>
       </div>
 
-      {/* 수치 데이터 */}
-      <div className="mt-3 flex items-baseline justify-center gap-1">
+      <div className="mt-2 flex items-baseline justify-center gap-1">
         {valuePrefix && (
-          <span className={`text-[18px] font-bold ${valueColorClassName}`}>
+          <span className={`text-[16px] font-bold ${valueColorClassName}`}>
             {valuePrefix}
           </span>
         )}
 
         <strong
-          className={`text-[36px] font-extrabold tracking-tighter ${valueColorClassName}`}
+          className={`text-[28px] font-extrabold tracking-tighter ${valueColorClassName}`}
         >
           {displayValue}
         </strong>
 
         {unit && (
-          <span className={`text-[18px] font-medium ${valueColorClassName}`}>
+          <span className={`text-[16px] font-medium ${valueColorClassName}`}>
             {unit}
           </span>
         )}
@@ -151,7 +150,7 @@ export default function WeeklyInsightCard({
     ? DESCRIPTION_CONTENT[selectedDescription]
     : null;
 
-  const visitIntentDiffRate = visitIntentScore;
+  const visitIntentDiffRate = Number(visitIntentScore) || 0;
   const visitIntentPrefix =
     visitIntentDiffRate > 0 ? '▲' : visitIntentDiffRate < 0 ? '▼' : '';
   const visitIntentValue = Math.abs(visitIntentDiffRate);
@@ -160,18 +159,20 @@ export default function WeeklyInsightCard({
 
   return (
     <>
-      <CardShell className="flex flex-col p-6">
-        {/* 상단 날짜 뱃지 */}
+      <CardShell className="flex flex-col items-center px-5 py-8">
+        <p className="text-center text-[18px] font-extrabold text-primary-100">
+          지난 주 리포트
+        </p>
+
         {weekRangeText && (
-          <div className="mb-2 text-center">
+          <div className="mt-4 mb-2 text-center">
             <span className="inline-block rounded-full bg-surface-100 px-3.5 py-1.5 text-[14px] font-semibold tracking-tight text-primary-100">
               {weekRangeText}
             </span>
           </div>
         )}
 
-        {/* 지표 영역 */}
-        <div className="mt-4 flex flex-col items-center gap-6">
+        <div className="mt-4 flex w-full items-stretch justify-center">
           <InsightMetricItem
             title="가게 노출수"
             value={reachCount}
@@ -181,8 +182,7 @@ export default function WeeklyInsightCard({
             onDescriptionOpen={setSelectedDescription}
           />
 
-          {/* 구분선 */}
-          <div className="w-full border-t border-gray-100" />
+          <div className="mx-2 w-px self-stretch bg-gray-100" />
 
           <InsightMetricItem
             title="방문 관심도"
@@ -190,7 +190,7 @@ export default function WeeklyInsightCard({
             valuePrefix={visitIntentPrefix}
             unit="%"
             descriptionKey="visitIntent"
-            decimalPlaces={0}
+            decimalPlaces={1}
             valueColorClassName={visitIntentColorClassName}
             onDescriptionOpen={setSelectedDescription}
           />

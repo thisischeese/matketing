@@ -15,15 +15,15 @@ export const mypageApi = {
   },
 
   // 통계
-  getWeeklyReach() {
-    return api.get('/api/v1/analytics/reach');
+  getLastWeekAnalytics() {
+    return api.get('/api/v1/analytics/last-week');
   },
 
-  getWeeklyVisitIntent() {
-    return api.get('/api/v1/analytics/visit-intent');
+  getThisWeekAnalytics() {
+    return api.get('/api/v1/analytics/this-week');
   },
 
-  getWeeklyAchievement() {
-    return api.get('/api/v1/analytics/achievement');
+  executeWeeklyStrategy() {
+    return api.patch('/api/v1/analytics/strategy/execute');
   },
 };
