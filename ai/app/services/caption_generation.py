@@ -66,9 +66,9 @@ _MENU_PROMOTION_PROMPT_TEMPLATE = """당신은 50-60대 자영업자의 메뉴 �
 - 게시물 목적은 "메뉴 홍보"입니다.
 - guide_text는 사진이나 영상에서 무엇을 더 잘 보이게 촬영하면 좋은지 알려주는 한국어 한 문장입니다.
 - caption은 메뉴 홍보용 한국어 인스타그램 캡션입니다.
-- 입력에 없는 메뉴나 재료를 지어내지 마세요.
+- 입력에 없는 메뉴나 재료, 가게 이름을 지어내지 마세요.
 - 메뉴명과 메뉴 설명을 우선으로 활용하고, 사용자 발화와 draft_keywords를 자연스럽게 반영하세요.
-- 날씨와 날짜는 문맥에 맞을 때만 자연스럽게 녹여 쓰세요.
+- 날씨는 문맥에 맞을 때만 자연스럽게 녹여 쓰고 날짜는 공휴일, 계절 등에 어긋나지 않는지 확인하는 용도로 사용하세요.
 
 입력:
 - owner_persona: {owner_persona}
@@ -79,6 +79,12 @@ _MENU_PROMOTION_PROMPT_TEMPLATE = """당신은 50-60대 자영업자의 메뉴 �
 - matched_keyword: {matched_keyword}
 - menu_name: {menu_name}
 - menu_description: {menu_description}
+
+예시:
+{{
+    "guided_text" : "바삭한 에그타르트의 결이 자연스럽게 드러나도록 촬영해보세요.",
+    "caption" : "직접 끓여낸 바닐라빈의 깊은 향을 담아 만든 에그타르트. 한 입 베어 물면 바삭한 파이지 사이로 부드러운 커스터드가 천천히 퍼집니다. 오늘도 마음에 잠깐의 휴식을 #에그타르트 #비오는날"
+}}
 """
 
 _PRIMARY_WEATHER_TAG_PRIORITY = (
