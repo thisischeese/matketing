@@ -40,7 +40,7 @@ STATUS_FAIL = "FRAME_EXTRACTED"
 STATUS_PHOTO_EDITED = "PHOTO_EDITED"
 logger = logging.getLogger(__name__)
 _PREVIEW_MAX_LENGTH = 120
-_PRE_UPSCALE_FILTER_TOOLS = {"filter", "sharpen", "background_blur"}
+_PRE_UPSCALE_FILTER_TOOLS = {"filter", "sharpen"}
 
 
 def _build_default_agent(tool_event_sink, upscale_enabled: bool):

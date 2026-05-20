@@ -13,6 +13,7 @@ from app.services.final_edit_tools import (
     analyze_image_tone,
     build_aesthetic_color_grading_params,
     normalize_tool_params,
+    supported_tool_names,
 )
 from tests.utils.session_support import FakeUpscaler
 
@@ -66,9 +67,6 @@ def test_normalize_tool_params_clamps_values() -> None:
         "saturation": -100.0,
         "tone_curve_shadow_lift": 0.0,
         "brightness": 1.0,
-    }
-    assert normalize_tool_params("background_blur", {"blur_radius": 99}) == {
-        "blur_radius": 20
     }
 
 
@@ -210,18 +208,26 @@ def test_tool_registry_excludes_upscale_when_disabled() -> None:
     assert "upscale" not in registry.tool_names
 
 
+def test_supported_tool_names_excludes_background_blur() -> None:
+    assert "background_blur" not in supported_tool_names()
+    assert "background_blur" not in FinalEditToolRegistry().tool_names
+
+
 def test_normalize_tool_params_upscale_forces_two_x() -> None:
     assert normalize_tool_params("upscale", {"scale": 4}) == {"scale": 2}
 
 
-def test_tool_registry_background_blur_preserves_shape() -> None:
+def test_tool_registry_rejects_background_blur() -> None:
     registry = FinalEditToolRegistry()
     image = np.zeros((12, 12, 3), dtype=np.uint8)
 
-    result, metadata = registry.execute("background_blur", image, {"blur_radius": 4})
+    with pytest.raises(ValueError, match="Unsupported tool: background_blur"):
+        registry.execute("background_blur", image, {"blur_radius": 4})
 
-    assert result.shape == image.shape
-    assert metadata == {}
+
+def test_normalize_tool_params_rejects_background_blur() -> None:
+    with pytest.raises(ValueError, match="Unsupported tool: background_blur"):
+        normalize_tool_params("background_blur", {"blur_radius": 99})
 
 
 def test_tool_registry_filter_applies_pixels_and_records_metadata() -> None:

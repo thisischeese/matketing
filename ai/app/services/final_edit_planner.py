@@ -115,7 +115,6 @@ _TOOL_ORDER_GROUPS: dict[ToolName, int] = {
     "filter": 1,
     "color_grading": 1,
     "sharpen": 1,
-    "background_blur": 1,
     "upscale": 2,
 }
 
@@ -199,7 +198,7 @@ def normalize_image_edit_plan(
         for _, tool_name in sorted(
             indexed_tools,
             key=lambda item: (
-                _TOOL_ORDER_GROUPS[item[1]],
+                _TOOL_ORDER_GROUPS.get(item[1], 1),
                 item[0],
             ),
         )

@@ -505,6 +505,51 @@ def test_final_edit_service_marks_image_fallback_when_agent_falls_back(
     assert uploader.source_paths[0].endswith("draft-001.png")
 
 
+def test_final_edit_service_falls_back_when_background_blur_plan_is_requested(
+    tmp_path: Path,
+    service_loop,
+) -> None:
+    uploader = CapturingFinalUploader()
+    service = FinalEditService(
+        downloader=StubDraftDownloader(),
+        uploader=uploader,
+        temp_root=tmp_path,
+        planner_client=FakePlannerClient(
+            [
+                ImageEditPlan(
+                    image_index=0,
+                    content="cake",
+                    strategy="blur background",
+                    tools=["background_blur"],
+                    params={"background_blur": {"blur_radius": 4}},
+                )
+            ]
+        ),
+        upscale_enabled=False,
+    )
+
+    result = _run_service(
+        service_loop,
+        service.edit_and_upload(
+            session_id="session-background-blur-fallback-1",
+            drafts=["/ai-drafts/session-background-blur-fallback-1/draft-001.png"],
+            context=FinalEditSessionContext(
+                caption="dessert showcase",
+                keywords=["cake"],
+            ),
+        ),
+    )
+
+    assert result.status == "PHOTO_EDITED"
+    assert result.debug_fields is not None
+    assert result.debug_fields["debug:tools:1"] == "background_blur"
+    assert result.debug_fields["debug:executed_tools:1"] == ""
+    assert result.debug_fields["debug:image_fallback:1"] == "true"
+    assert result.debug_fields["debug:image_failure:1"] == "plan_validation_failed:ValueError"
+    assert result.debug_fields["debug:upload_source_kind:1"] == "original_fallback"
+    assert uploader.source_paths[0].endswith("draft-001.png")
+
+
 def test_final_edit_service_marks_edited_upload_source_when_agent_succeeds(
     tmp_path: Path,
     service_loop,

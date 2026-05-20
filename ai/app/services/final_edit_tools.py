@@ -22,7 +22,6 @@ ToolName = Literal[
     "filter",
     "color_grading",
     "sharpen",
-    "background_blur",
 ]
 CropEdge = Literal["top", "bottom", "left", "right"]
 CropOrientation = Literal["portrait", "square", "landscape"]
@@ -133,9 +132,12 @@ def _resolve_upscale_enabled(upscale_enabled: bool | None) -> bool:
 def supported_tool_specs(
     upscale_enabled: bool | None = None,
 ) -> tuple[FinalEditToolSpec, ...]:
+    visible_specs = tuple(
+        spec for spec in SUPPORTED_TOOL_SPECS if spec.name != "background_blur"
+    )
     if _resolve_upscale_enabled(upscale_enabled):
-        return SUPPORTED_TOOL_SPECS
-    return tuple(spec for spec in SUPPORTED_TOOL_SPECS if spec.name != "upscale")
+        return visible_specs
+    return tuple(spec for spec in visible_specs if spec.name != "upscale")
 
 
 def supported_tool_names(upscale_enabled: bool | None = None) -> tuple[ToolName, ...]:
@@ -352,13 +354,6 @@ def normalize_tool_params(tool_name: ToolName, params: dict[str, Any]) -> dict[s
         return normalized
     if tool_name == "sharpen":
         return {"strength": _clamp_float(params.get("strength"), 0.5, 0.0, 1.0)}
-    if tool_name == "background_blur":
-        blur_radius = params.get("blur_radius", 5)
-        try:
-            blur_radius_int = int(blur_radius)
-        except (TypeError, ValueError):
-            blur_radius_int = 5
-        return {"blur_radius": max(1, min(20, blur_radius_int))}
     raise ValueError(f"Unsupported tool: {tool_name}")
 
 
@@ -963,7 +958,6 @@ class FinalEditToolRegistry:
             "filter": _tool_filter,
             "color_grading": _tool_color_grading,
             "sharpen": _tool_sharpen,
-            "background_blur": _tool_background_blur,
         }
         if self._upscale_enabled:
             self._tool_functions["upscale"] = _tool_upscale
