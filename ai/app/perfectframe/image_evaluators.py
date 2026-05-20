@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from app.core.config import settings
 from app.logging import build_log_extra
 from app.perfectframe.schemas import ImagesBatch
 
@@ -31,7 +32,30 @@ class NIMAEvaluator(ImageEvaluator):
     def __init__(self, weights_path: Path) -> None:
         import onnxruntime as ort
 
-        self._session = ort.InferenceSession(str(weights_path))
+        session_options = ort.SessionOptions()
+        session_options.intra_op_num_threads = settings.NIMA_ORT_INTRA_OP_THREADS
+        session_options.inter_op_num_threads = settings.NIMA_ORT_INTER_OP_THREADS
+        session_options.execution_mode = self._resolve_execution_mode(ort)
+        session_options.graph_optimization_level = (
+            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            if settings.NIMA_ORT_ENABLE_ALL_OPTIMIZATIONS
+            else ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        )
+
+        self._provider = "CPUExecutionProvider"
+        self._execution_mode = settings.NIMA_ORT_EXECUTION_MODE
+        self._intra_op_num_threads = settings.NIMA_ORT_INTRA_OP_THREADS
+        self._inter_op_num_threads = settings.NIMA_ORT_INTER_OP_THREADS
+        self._graph_optimization_level = (
+            "ORT_ENABLE_ALL"
+            if settings.NIMA_ORT_ENABLE_ALL_OPTIMIZATIONS
+            else "ORT_DISABLE_ALL"
+        )
+        self._session = ort.InferenceSession(
+            str(weights_path),
+            sess_options=session_options,
+            providers=[self._provider],
+        )
         self._input_name = self._session.get_inputs()[0].name
 
     def evaluate_images(self, normalized_images: ImagesBatch) -> list[float]:
@@ -45,6 +69,32 @@ class NIMAEvaluator(ImageEvaluator):
 
     def _calculate_weighted_mean(self, prediction: np.ndarray) -> float:
         return float(np.sum(prediction * self._prediction_weights) / self._weights_sum)
+
+    @property
+    def provider(self) -> str:
+        return self._provider
+
+    @property
+    def intra_op_num_threads(self) -> int:
+        return self._intra_op_num_threads
+
+    @property
+    def inter_op_num_threads(self) -> int:
+        return self._inter_op_num_threads
+
+    @property
+    def execution_mode(self) -> str:
+        return self._execution_mode
+
+    @property
+    def graph_optimization_level(self) -> str:
+        return self._graph_optimization_level
+
+    @staticmethod
+    def _resolve_execution_mode(ort):
+        if settings.NIMA_ORT_EXECUTION_MODE == "parallel":
+            return ort.ExecutionMode.ORT_PARALLEL
+        return ort.ExecutionMode.ORT_SEQUENTIAL
 
 
 def build_image_evaluator(weights_path: Path | None) -> ImageEvaluator:
@@ -89,6 +139,11 @@ def build_image_evaluator(weights_path: Path | None) -> ImageEvaluator:
             stage="nima_evaluator_init",
             outcome="succeeded",
             weights_path=str(weights_path),
+            nima_provider=evaluator.provider,
+            nima_intra_op_threads=evaluator.intra_op_num_threads,
+            nima_inter_op_threads=evaluator.inter_op_num_threads,
+            nima_execution_mode=evaluator.execution_mode,
+            nima_graph_optimization_level=evaluator.graph_optimization_level,
         ),
     )
     return evaluator
