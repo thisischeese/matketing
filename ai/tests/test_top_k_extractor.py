@@ -151,3 +151,19 @@ def test_extract_top_k_frames_distributes_results_across_timeline() -> None:
 
     # Segment maxima: max(1,2,3,9,4)=9, max(5,6,8,5,4)=8, max(3,2,7,1,1)=7.
     assert [score for _, score in results] == [9.0, 8.0, 7.0]
+
+
+def test_extract_top_k_frames_records_profile_metrics() -> None:
+    batches = [[_make_frame(s) for s in (1, 9, 4, 7, 2, 8)]]
+    extractor = _make_extractor(batches)
+
+    results = extractor.extract_top_k_frames(Path("dummy.mp4"), k=3)
+
+    assert len(results) == 3
+    assert extractor.last_profile["extract_profile_batches"] == 1
+    assert extractor.last_profile["extract_profile_sampled_frames"] == 6
+    assert "extract_profile_decode_wait_ms" in extractor.last_profile
+    assert "extract_profile_normalize_ms" in extractor.last_profile
+    assert "extract_profile_inference_ms" in extractor.last_profile
+    assert "extract_profile_candidate_collect_ms" in extractor.last_profile
+    assert "extract_profile_segment_select_ms" in extractor.last_profile

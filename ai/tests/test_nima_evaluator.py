@@ -7,6 +7,7 @@ import httpx
 import numpy as np
 import pytest
 
+from app.core.config import settings
 from app.perfectframe.image_evaluators import (
     NIMAEvaluator,
     SharpnessVarianceEvaluator,
@@ -21,6 +22,25 @@ from app.perfectframe.weights import (
 def _build_evaluator(weights_path: Path, session_mock: MagicMock) -> NIMAEvaluator:
     with patch("onnxruntime.InferenceSession", return_value=session_mock):
         return NIMAEvaluator(weights_path)
+
+
+@pytest.fixture
+def restore_nima_ort_settings():
+    original = (
+        settings.NIMA_ORT_INTRA_OP_THREADS,
+        settings.NIMA_ORT_INTER_OP_THREADS,
+        settings.NIMA_ORT_EXECUTION_MODE,
+        settings.NIMA_ORT_ENABLE_ALL_OPTIMIZATIONS,
+    )
+    try:
+        yield
+    finally:
+        (
+            settings.NIMA_ORT_INTRA_OP_THREADS,
+            settings.NIMA_ORT_INTER_OP_THREADS,
+            settings.NIMA_ORT_EXECUTION_MODE,
+            settings.NIMA_ORT_ENABLE_ALL_OPTIMIZATIONS,
+        ) = original
 
 
 def test_nima_evaluator_weighted_mean_returns_known_score(tmp_path: Path) -> None:
@@ -57,6 +77,89 @@ def test_nima_evaluator_handles_non_array_predictions(tmp_path: Path) -> None:
 
     images = np.zeros((1, 224, 224, 3), dtype=np.float32)
     assert evaluator.evaluate_images(images) == []
+
+
+def test_nima_evaluator_initializes_cpu_session_options(tmp_path: Path) -> None:
+    import onnxruntime as ort
+
+    session = MagicMock()
+    session.get_inputs.return_value = [MagicMock()]
+    session.get_inputs.return_value[0].name = "input_1"
+    weights_path = tmp_path / "weights.onnx"
+    weights_path.write_bytes(b"")
+
+    with patch("onnxruntime.InferenceSession", return_value=session) as session_ctor:
+        evaluator = NIMAEvaluator(weights_path)
+
+    _, kwargs = session_ctor.call_args
+    sess_options = kwargs["sess_options"]
+    assert kwargs["providers"] == ["CPUExecutionProvider"]
+    assert sess_options.intra_op_num_threads == 4
+    assert sess_options.inter_op_num_threads == 1
+    assert sess_options.execution_mode == ort.ExecutionMode.ORT_SEQUENTIAL
+    assert (
+        sess_options.graph_optimization_level
+        == ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    )
+    assert evaluator.provider == "CPUExecutionProvider"
+    assert evaluator.intra_op_num_threads == 4
+    assert evaluator.inter_op_num_threads == 1
+    assert evaluator.execution_mode == "sequential"
+    assert evaluator.graph_optimization_level == "ORT_ENABLE_ALL"
+
+
+def test_nima_evaluator_applies_setting_overrides(
+    tmp_path: Path,
+    restore_nima_ort_settings,
+) -> None:
+    import onnxruntime as ort
+
+    settings.NIMA_ORT_INTRA_OP_THREADS = 3
+    settings.NIMA_ORT_INTER_OP_THREADS = 2
+    settings.NIMA_ORT_EXECUTION_MODE = "parallel"
+    settings.NIMA_ORT_ENABLE_ALL_OPTIMIZATIONS = False
+
+    session = MagicMock()
+    session.get_inputs.return_value = [MagicMock()]
+    session.get_inputs.return_value[0].name = "input_1"
+    weights_path = tmp_path / "weights.onnx"
+    weights_path.write_bytes(b"")
+
+    with patch("onnxruntime.InferenceSession", return_value=session) as session_ctor:
+        evaluator = NIMAEvaluator(weights_path)
+
+    _, kwargs = session_ctor.call_args
+    sess_options = kwargs["sess_options"]
+    assert sess_options.intra_op_num_threads == 3
+    assert sess_options.inter_op_num_threads == 2
+    assert sess_options.execution_mode == ort.ExecutionMode.ORT_PARALLEL
+    assert (
+        sess_options.graph_optimization_level
+        == ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+    )
+    assert evaluator.intra_op_num_threads == 3
+    assert evaluator.inter_op_num_threads == 2
+    assert evaluator.execution_mode == "parallel"
+    assert evaluator.graph_optimization_level == "ORT_DISABLE_ALL"
+
+
+def test_nima_ort_setting_normalization_falls_back_to_safe_defaults() -> None:
+    from app.core.config import Settings
+
+    normalized = Settings(
+        POSTGRES_DB="db",
+        POSTGRES_USER="user",
+        POSTGRES_PASSWORD="pw",
+        NIMA_ORT_INTRA_OP_THREADS=0,
+        NIMA_ORT_INTER_OP_THREADS=-1,
+        NIMA_ORT_EXECUTION_MODE="broken",
+        NIMA_ORT_ENABLE_ALL_OPTIMIZATIONS="true",
+    )
+
+    assert normalized.NIMA_ORT_INTRA_OP_THREADS == 4
+    assert normalized.NIMA_ORT_INTER_OP_THREADS == 1
+    assert normalized.NIMA_ORT_EXECUTION_MODE == "sequential"
+    assert normalized.NIMA_ORT_ENABLE_ALL_OPTIMIZATIONS is True
 
 
 def test_build_image_evaluator_falls_back_when_weights_missing(tmp_path: Path) -> None:

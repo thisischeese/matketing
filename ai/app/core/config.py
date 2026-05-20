@@ -41,6 +41,10 @@ DEFAULT_NIMA_WEIGHTS_PATH = ROOT_DIR / "models" / "nima" / "weights.onnx"
 DEFAULT_NIMA_WEIGHTS_URL = (
     "https://huggingface.co/BKDDFS/nima_weights/resolve/main/weights.onnx"
 )
+DEFAULT_NIMA_ORT_INTRA_OP_THREADS = 4
+DEFAULT_NIMA_ORT_INTER_OP_THREADS = 1
+DEFAULT_NIMA_ORT_EXECUTION_MODE = "sequential"
+DEFAULT_NIMA_ORT_ENABLE_ALL_OPTIMIZATIONS = True
 DEFAULT_REALESRGAN_WEIGHTS_PATH = (
     ROOT_DIR / "models" / "realesrgan" / "RealESRGAN_x2plus.pth"
 )
@@ -112,6 +116,12 @@ class Settings(BaseSettings):
     CLOUDFRONT_DOMAIN: str | None = None
 
     NIMA_WEIGHTS_URL: str = DEFAULT_NIMA_WEIGHTS_URL
+    NIMA_ORT_INTRA_OP_THREADS: int = DEFAULT_NIMA_ORT_INTRA_OP_THREADS
+    NIMA_ORT_INTER_OP_THREADS: int = DEFAULT_NIMA_ORT_INTER_OP_THREADS
+    NIMA_ORT_EXECUTION_MODE: str = DEFAULT_NIMA_ORT_EXECUTION_MODE
+    NIMA_ORT_ENABLE_ALL_OPTIMIZATIONS: bool = (
+        DEFAULT_NIMA_ORT_ENABLE_ALL_OPTIMIZATIONS
+    )
     REALESRGAN_WEIGHTS_URL: str = DEFAULT_REALESRGAN_WEIGHTS_URL
 
     KEYWORD_MODEL_HOST_DIR: str = DEFAULT_KEYWORD_MODEL_HOST_DIR
@@ -190,6 +200,34 @@ class Settings(BaseSettings):
             if normalized in {"debug", "local", "dev", "development"}:
                 return True
         return value
+
+    @field_validator(
+        "NIMA_ORT_INTRA_OP_THREADS",
+        "NIMA_ORT_INTER_OP_THREADS",
+        mode="before",
+    )
+    @classmethod
+    def normalize_nima_ort_thread_count(cls, value: object, info) -> int:
+        default = (
+            DEFAULT_NIMA_ORT_INTRA_OP_THREADS
+            if info.field_name == "NIMA_ORT_INTRA_OP_THREADS"
+            else DEFAULT_NIMA_ORT_INTER_OP_THREADS
+        )
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return parsed if parsed > 0 else default
+
+    @field_validator("NIMA_ORT_EXECUTION_MODE", mode="before")
+    @classmethod
+    def normalize_nima_ort_execution_mode(cls, value: object) -> str:
+        if not isinstance(value, str):
+            return DEFAULT_NIMA_ORT_EXECUTION_MODE
+        normalized = value.strip().lower()
+        if normalized in {"sequential", "parallel"}:
+            return normalized
+        return DEFAULT_NIMA_ORT_EXECUTION_MODE
 
     @computed_field
     @property

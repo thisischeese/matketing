@@ -17,6 +17,8 @@ from app.perfectframe.schemas import (
 )
 from app.perfectframe.video_processors import _import_cv2
 
+NIMA_RESIZE_INTERPOLATION = "INTER_LINEAR"
+
 
 class ImageProcessor(ABC):
     """Abstract image processor."""
@@ -53,7 +55,7 @@ class OpenCVImage(ImageProcessor):
             resized = cv2.resize(
                 image,
                 (target_size.width, target_size.height),
-                interpolation=cv2.INTER_LANCZOS4,
+                interpolation=getattr(cv2, NIMA_RESIZE_INTERPOLATION),
             )
             rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
             normalized.append(rgb)

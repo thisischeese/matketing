@@ -43,6 +43,7 @@ class S3DraftUploader:
 
     def __init__(self) -> None:
         self._settings = settings
+        self._client = build_s3_client() if self._settings.s3_configured else None
 
     @property
     def is_configured(self) -> bool:
@@ -75,8 +76,8 @@ class S3DraftUploader:
 
     def _upload_file(self, session_id: str, image_path: Path, draft_index: int) -> str:
         object_key = f"ai-drafts/{session_id}/draft-{draft_index:03d}.png"
-        client = build_s3_client()
-        client.upload_file(
+        assert self._client is not None
+        self._client.upload_file(
             str(image_path),
             self._settings.S3_BUCKET_NAME,
             object_key,
@@ -90,6 +91,7 @@ class S3VideoDownloader:
 
     def __init__(self) -> None:
         self._settings = settings
+        self._client = build_s3_client() if self._settings.s3_configured else None
 
     @property
     def is_configured(self) -> bool:
@@ -99,8 +101,8 @@ class S3VideoDownloader:
         await asyncio.to_thread(self._download_video, video_key, destination)
 
     def _download_video(self, video_key: str, destination: Path) -> None:
-        client = build_s3_client()
-        client.download_file(
+        assert self._client is not None
+        self._client.download_file(
             self._settings.S3_BUCKET_NAME,
             normalize_s3_key(video_key),
             str(destination),
@@ -123,6 +125,92 @@ class FrameExtractionService:
         self.downloader = downloader
         self.uploader = uploader
         self.temp_root = temp_root
+
+    async def _upload_single_draft(
+        self,
+        session_id: str,
+        video_key: str,
+        session_dir: Path,
+        draft_index: int,
+        frame: Image,
+        frame_score: float,
+    ) -> tuple[int, str | None, dict[str, str]]:
+        source_shape = "x".join(str(dimension) for dimension in frame.shape)
+        draft_debug_fields = {
+            f"debug:frame_shape:source:{draft_index}": source_shape,
+            f"debug:frame_score:{draft_index}": f"{frame_score:.6f}",
+        }
+        logger.info(
+            "Selected frame for draft.",
+            extra=build_log_extra(
+                "frame_extraction.select_frame",
+                component="frame_extraction",
+                stage="select_frame",
+                session_id=session_id,
+                outcome="succeeded",
+                video_key=video_key,
+                draft_index=draft_index,
+                frame_shape=source_shape,
+                frame_score=f"{frame_score:.6f}",
+            ),
+        )
+
+        upload_started_at = time.perf_counter()
+        logger.info(
+            "Uploading extracted source frame as draft.",
+            extra=build_log_extra(
+                "frame_extraction.upload_frame.started",
+                component="frame_extraction",
+                stage="upload_frame",
+                session_id=session_id,
+                outcome="started",
+                video_key=video_key,
+                draft_index=draft_index,
+                frame_shape=source_shape,
+            ),
+        )
+        uploaded_path = await self.uploader.upload_frame(
+            session_id,
+            frame,
+            session_dir,
+            draft_index=draft_index,
+        )
+        elapsed_ms = int((time.perf_counter() - upload_started_at) * 1000)
+        if uploaded_path is None:
+            draft_debug_fields[f"debug:upload_result:{draft_index}"] = "none"
+            logger.warning(
+                "Frame upload returned no draft path.",
+                extra=build_log_extra(
+                    "frame_extraction.upload_frame.completed",
+                    component="frame_extraction",
+                    stage="upload_frame",
+                    session_id=session_id,
+                    outcome="failed",
+                    error_type="s3_upload_unavailable",
+                    video_key=video_key,
+                    draft_index=draft_index,
+                    elapsed_ms=elapsed_ms,
+                ),
+            )
+            return draft_index, None, draft_debug_fields
+
+        draft_debug_fields[f"debug:upload_result:{draft_index}"] = uploaded_path
+        logger.info(
+            "Draft frame uploaded.",
+            extra=build_log_extra(
+                "frame_extraction.upload_frame.completed",
+                component="frame_extraction",
+                stage="upload_frame",
+                session_id=session_id,
+                outcome="succeeded",
+                video_key=video_key,
+                draft_index=draft_index,
+                draft_path=uploaded_path,
+                frame_shape=source_shape,
+                elapsed_ms=elapsed_ms,
+            ),
+        )
+        return draft_index, uploaded_path, draft_debug_fields
 
     @staticmethod
     def _resolve_download_video_path(session_dir: Path, video_key: str) -> Path:
@@ -298,6 +386,9 @@ class FrameExtractionService:
             video_path,
             DRAFT_TOP_K,
         )
+        extractor_profile = getattr(self.extractor, "last_profile", {}) or {}
+        for key, value in extractor_profile.items():
+            debug_fields[f"debug:{key}"] = str(value)
         if not extracted:
             debug_fields["debug:extractor_result"] = "none"
             logger.warning(
@@ -317,6 +408,7 @@ class FrameExtractionService:
                         for key, value in OpenCVVideo.last_scan_metadata.items()
                         if value is not None
                     },
+                    **extractor_profile,
                     elapsed_ms=int((time.perf_counter() - extract_started_at) * 1000),
                 ),
             )
@@ -340,6 +432,7 @@ class FrameExtractionService:
                     for key, value in OpenCVVideo.last_scan_metadata.items()
                     if value is not None
                 },
+                **extractor_profile,
                 elapsed_ms=int((time.perf_counter() - extract_started_at) * 1000),
             ),
         )
@@ -353,82 +446,26 @@ class FrameExtractionService:
         extracted: list[tuple[Image, float]],
         debug_fields: dict[str, str],
     ) -> list[str] | None:
-        uploaded_paths: list[str] = []
-        for draft_index, (frame, frame_score) in enumerate(extracted, start=1):
-            source_shape = "x".join(str(dimension) for dimension in frame.shape)
-            debug_fields[f"debug:frame_shape:source:{draft_index}"] = source_shape
-            debug_fields[f"debug:frame_score:{draft_index}"] = f"{frame_score:.6f}"
-            logger.info(
-                "Selected frame for draft.",
-                extra=build_log_extra(
-                    "frame_extraction.select_frame",
-                    component="frame_extraction",
-                    stage="select_frame",
-                    session_id=session_id,
-                    outcome="succeeded",
-                    video_key=video_key,
-                    draft_index=draft_index,
-                    frame_shape=source_shape,
-                    frame_score=f"{frame_score:.6f}",
-                ),
-            )
-
-            debug_fields["debug:stage"] = f"upload_frame_{draft_index}"
-            upload_started_at = time.perf_counter()
-            logger.info(
-                "Uploading extracted source frame as draft.",
-                extra=build_log_extra(
-                    "frame_extraction.upload_frame.started",
-                    component="frame_extraction",
-                    stage="upload_frame",
-                    session_id=session_id,
-                    outcome="started",
-                    video_key=video_key,
-                    draft_index=draft_index,
-                    frame_shape=source_shape,
-                ),
-            )
-            uploaded_path = await self.uploader.upload_frame(
+        tasks = [
+            self._upload_single_draft(
                 session_id,
-                frame,
+                video_key,
                 session_dir,
-                draft_index=draft_index,
+                draft_index,
+                frame,
+                frame_score,
             )
+            for draft_index, (frame, frame_score) in enumerate(extracted, start=1)
+        ]
+        results = await asyncio.gather(*tasks)
+        ordered_results = sorted(results, key=lambda item: item[0])
+        uploaded_paths: list[str] = []
+        for draft_index, uploaded_path, draft_debug_fields in ordered_results:
+            debug_fields["debug:stage"] = f"upload_frame_{draft_index}"
+            debug_fields.update(draft_debug_fields)
             if uploaded_path is None:
-                debug_fields[f"debug:upload_result:{draft_index}"] = "none"
-                logger.warning(
-                    "Frame upload returned no draft path.",
-                    extra=build_log_extra(
-                        "frame_extraction.upload_frame.completed",
-                        component="frame_extraction",
-                        stage="upload_frame",
-                        session_id=session_id,
-                        outcome="failed",
-                        error_type="s3_upload_unavailable",
-                        video_key=video_key,
-                        draft_index=draft_index,
-                        elapsed_ms=int((time.perf_counter() - upload_started_at) * 1000),
-                    ),
-                )
                 return None
-
-            debug_fields[f"debug:upload_result:{draft_index}"] = uploaded_path
             uploaded_paths.append(uploaded_path)
-            logger.info(
-                "Draft frame uploaded.",
-                extra=build_log_extra(
-                    "frame_extraction.upload_frame.completed",
-                    component="frame_extraction",
-                    stage="upload_frame",
-                    session_id=session_id,
-                    outcome="succeeded",
-                    video_key=video_key,
-                    draft_index=draft_index,
-                    draft_path=uploaded_path,
-                    frame_shape=source_shape,
-                    elapsed_ms=int((time.perf_counter() - upload_started_at) * 1000),
-                ),
-            )
         return uploaded_paths
 
     async def extract_and_upload(
