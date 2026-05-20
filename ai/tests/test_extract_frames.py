@@ -82,8 +82,8 @@ def test_extract_frames_preserves_existing_final_keywords(
 
     assert extract_response.status_code == 200
     saved = fake_redis_sync.hgetall(session_key(session_id))
-    assert saved["final_keyword:1"] == "1042:signature menu"
-    assert saved["final_keyword:2"] == "2051:cozy table"
+    assert saved["final_keyword:1"] == "signature menu"
+    assert saved["final_keyword:2"] == "cozy table"
 
 
 def test_extract_frames_returns_fail_when_service_fails(

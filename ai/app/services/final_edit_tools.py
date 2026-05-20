@@ -4,8 +4,14 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 import numpy as np
+from PIL import Image
 
 from app.core.config import settings
+from app.services.final_edit_filter_catalog import (
+    FinalEditFilterCatalogError,
+    resolve_final_edit_filter_definition,
+    resolve_final_edit_filter_name,
+)
 from app.services.final_edit_runtime import import_cv2
 from app.services.final_edit_upscaler import get_realesrgan_upscaler
 
@@ -13,9 +19,9 @@ ToolName = Literal[
     "crop",
     "upscale",
     "denoise",
+    "filter",
     "color_grading",
     "sharpen",
-    "background_blur",
 ]
 CropEdge = Literal["top", "bottom", "left", "right"]
 CropOrientation = Literal["portrait", "square", "landscape"]
@@ -83,6 +89,11 @@ SUPPORTED_TOOL_SPECS: tuple[FinalEditToolSpec, ...] = (
         params_schema={"strength": "0.0~1.0"},
     ),
     FinalEditToolSpec(
+        name="filter",
+        description="Records the VLM-selected filter name for downstream LangGraph execution.",
+        params_schema={"filter_name": "catalog filter name"},
+    ),
+    FinalEditToolSpec(
         name="color_grading",
         description="목표 톤에 맞춰 색온도, 채도, 명암을 미세 조정한다.",
         params_schema={
@@ -121,9 +132,12 @@ def _resolve_upscale_enabled(upscale_enabled: bool | None) -> bool:
 def supported_tool_specs(
     upscale_enabled: bool | None = None,
 ) -> tuple[FinalEditToolSpec, ...]:
+    visible_specs = tuple(
+        spec for spec in SUPPORTED_TOOL_SPECS if spec.name != "background_blur"
+    )
     if _resolve_upscale_enabled(upscale_enabled):
-        return SUPPORTED_TOOL_SPECS
-    return tuple(spec for spec in SUPPORTED_TOOL_SPECS if spec.name != "upscale")
+        return visible_specs
+    return tuple(spec for spec in visible_specs if spec.name != "upscale")
 
 
 def supported_tool_names(upscale_enabled: bool | None = None) -> tuple[ToolName, ...]:
@@ -296,6 +310,12 @@ def normalize_tool_params(tool_name: ToolName, params: dict[str, Any]) -> dict[s
         return {"scale": 2}
     if tool_name == "denoise":
         return {"strength": _clamp_float(params.get("strength"), 0.5, 0.0, 1.0)}
+    if tool_name == "filter":
+        try:
+            filter_name = resolve_final_edit_filter_name(params.get("filter_name", ""))
+        except FinalEditFilterCatalogError as exc:
+            raise ValueError(str(exc)) from exc
+        return {"filter_name": filter_name}
     if tool_name == "color_grading":
         legacy_mode = _is_legacy_color_grading_params(params)
         normalized_saturation = (
@@ -334,13 +354,6 @@ def normalize_tool_params(tool_name: ToolName, params: dict[str, Any]) -> dict[s
         return normalized
     if tool_name == "sharpen":
         return {"strength": _clamp_float(params.get("strength"), 0.5, 0.0, 1.0)}
-    if tool_name == "background_blur":
-        blur_radius = params.get("blur_radius", 5)
-        try:
-            blur_radius_int = int(blur_radius)
-        except (TypeError, ValueError):
-            blur_radius_int = 5
-        return {"blur_radius": max(1, min(20, blur_radius_int))}
     raise ValueError(f"Unsupported tool: {tool_name}")
 
 
@@ -604,6 +617,76 @@ def _tool_denoise(image: np.ndarray, params: dict[str, Any]) -> np.ndarray:
     strength = cast(float, params["strength"])
     h_value = int(3 + strength * 12)
     return cv2.fastNlMeansDenoisingColored(image, None, h_value, h_value, 7, 21)
+
+
+def _import_pilgram2() -> Any:
+    import pilgram2
+
+    return pilgram2
+
+
+def _coerce_uint8_image(image: np.ndarray) -> np.ndarray:
+    if image.dtype == np.uint8:
+        return image
+    return np.clip(image, 0, 255).astype(np.uint8)
+
+
+def _numpy_image_to_pil_rgb(image: np.ndarray) -> Image.Image:
+    cv2 = import_cv2()
+    working = _coerce_uint8_image(image)
+
+    if working.ndim == 2:
+        rgb = cv2.cvtColor(working, cv2.COLOR_GRAY2RGB)
+        return Image.fromarray(rgb)
+
+    if working.ndim != 3:
+        raise ValueError(f"Unsupported image shape for filter tool: {working.shape!r}")
+
+    channel_count = working.shape[2]
+    if channel_count == 1:
+        rgb = cv2.cvtColor(working, cv2.COLOR_GRAY2RGB)
+    elif channel_count == 3:
+        rgb = cv2.cvtColor(working, cv2.COLOR_BGR2RGB)
+    elif channel_count == 4:
+        bgr = cv2.cvtColor(working, cv2.COLOR_BGRA2BGR)
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    else:
+        raise ValueError(f"Unsupported channel count for filter tool: {channel_count}")
+    return Image.fromarray(rgb)
+
+
+def _pil_image_to_bgr_array(image: Image.Image) -> np.ndarray:
+    cv2 = import_cv2()
+    rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+
+def _tool_filter(
+    image: np.ndarray,
+    params: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    filter_name = cast(str, params["filter_name"])
+    filter_definition = resolve_final_edit_filter_definition(filter_name)
+    pilgram2 = _import_pilgram2()
+    filter_callable = getattr(pilgram2, filter_definition.pilgram2_name, None)
+    if filter_callable is None or not callable(filter_callable):
+        raise ValueError(
+            f"pilgram2 filter callable is unavailable: {filter_definition.pilgram2_name}"
+        )
+
+    pil_image = _numpy_image_to_pil_rgb(image)
+    filtered_image = filter_callable(pil_image)
+    if not isinstance(filtered_image, Image.Image):
+        raise TypeError(
+            f"Unexpected pilgram2 filter result type: {type(filtered_image)!r}"
+        )
+    filtered_bgr = _pil_image_to_bgr_array(filtered_image)
+    return filtered_bgr, {
+        "filter_applied": True,
+        "selected_filter": filter_definition.name,
+        "selected_filter_backend": "pilgram2",
+        "selected_filter_callable": filter_definition.pilgram2_name,
+    }
 
 
 def analyze_image_tone(image: np.ndarray) -> dict[str, float]:
@@ -872,9 +955,9 @@ class FinalEditToolRegistry:
         self._tool_functions = {
             "crop": _tool_crop,
             "denoise": _tool_denoise,
+            "filter": _tool_filter,
             "color_grading": _tool_color_grading,
             "sharpen": _tool_sharpen,
-            "background_blur": _tool_background_blur,
         }
         if self._upscale_enabled:
             self._tool_functions["upscale"] = _tool_upscale

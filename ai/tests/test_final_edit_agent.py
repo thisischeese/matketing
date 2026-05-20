@@ -13,6 +13,7 @@ from app.services.final_edit_tools import (
     analyze_image_tone,
     build_aesthetic_color_grading_params,
     normalize_tool_params,
+    supported_tool_names,
 )
 from tests.utils.session_support import FakeUpscaler
 
@@ -48,6 +49,9 @@ def fake_realesrgan_upscaler(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_normalize_tool_params_clamps_values() -> None:
     assert normalize_tool_params("upscale", {"scale": 8}) == {"scale": 2}
     assert normalize_tool_params("denoise", {"strength": 4}) == {"strength": 1.0}
+    assert normalize_tool_params("filter", {"filter_name": "Valencia"}) == {
+        "filter_name": "Valencia"
+    }
     assert normalize_tool_params(
         "color_grading",
         {"temperature": "invalid", "saturation": -3, "brightness": 3},
@@ -63,9 +67,6 @@ def test_normalize_tool_params_clamps_values() -> None:
         "saturation": -100.0,
         "tone_curve_shadow_lift": 0.0,
         "brightness": 1.0,
-    }
-    assert normalize_tool_params("background_blur", {"blur_radius": 99}) == {
-        "blur_radius": 20
     }
 
 
@@ -192,7 +193,7 @@ def test_build_aesthetic_color_grading_params_zeroes_highlights_for_sub_threshol
 
 
 def test_tool_registry_upscale_changes_shape() -> None:
-    registry = FinalEditToolRegistry()
+    registry = FinalEditToolRegistry(upscale_enabled=True)
     image = np.zeros((8, 8, 3), dtype=np.uint8)
 
     result, metadata = registry.execute("upscale", image, {"scale": 4})
@@ -207,18 +208,44 @@ def test_tool_registry_excludes_upscale_when_disabled() -> None:
     assert "upscale" not in registry.tool_names
 
 
+def test_supported_tool_names_excludes_background_blur() -> None:
+    assert "background_blur" not in supported_tool_names()
+    assert "background_blur" not in FinalEditToolRegistry().tool_names
+
+
 def test_normalize_tool_params_upscale_forces_two_x() -> None:
     assert normalize_tool_params("upscale", {"scale": 4}) == {"scale": 2}
 
 
-def test_tool_registry_background_blur_preserves_shape() -> None:
+def test_tool_registry_rejects_background_blur() -> None:
     registry = FinalEditToolRegistry()
     image = np.zeros((12, 12, 3), dtype=np.uint8)
 
-    result, metadata = registry.execute("background_blur", image, {"blur_radius": 4})
+    with pytest.raises(ValueError, match="Unsupported tool: background_blur"):
+        registry.execute("background_blur", image, {"blur_radius": 4})
+
+
+def test_normalize_tool_params_rejects_background_blur() -> None:
+    with pytest.raises(ValueError, match="Unsupported tool: background_blur"):
+        normalize_tool_params("background_blur", {"blur_radius": 99})
+
+
+def test_tool_registry_filter_applies_pixels_and_records_metadata() -> None:
+    registry = FinalEditToolRegistry()
+    image = np.full((12, 12, 3), 110, dtype=np.uint8)
+    image[:, :6, 2] = 220
+
+    result, metadata = registry.execute("filter", image, {"filter_name": "Reyes"})
 
     assert result.shape == image.shape
-    assert metadata == {}
+    assert result.dtype == image.dtype
+    assert not np.array_equal(result, image)
+    assert metadata == {
+        "filter_applied": True,
+        "selected_filter": "Reyes",
+        "selected_filter_backend": "pilgram2",
+        "selected_filter_callable": "reyes",
+    }
 
 
 def test_tool_registry_color_grading_changes_pixels_and_preserves_dtype() -> None:
@@ -372,7 +399,10 @@ async def test_final_edit_agent_keeps_planner_params_for_non_aesthetic(
 async def test_final_edit_agent_writes_edited_image(tmp_path: Path) -> None:
     image_path = tmp_path / "draft.png"
     _write_test_image(image_path)
-    agent = FinalEditAgent(FinalEditToolRegistry())
+    agent = FinalEditAgent(
+        FinalEditToolRegistry(upscale_enabled=True),
+        upscale_enabled=True,
+    )
     state = FinalEditImageState(
         image_path=image_path,
         working_dir=tmp_path / "edited",
@@ -424,11 +454,75 @@ async def test_final_edit_agent_strips_disabled_upscale_before_execution(
     result = await agent.run(state)
 
     assert result.fallback_to_original is False
-    assert result.executed_tools == ["color_grading"]
+    assert result.executed_tools == []
+    assert result.output_path == image_path
+
+
+@pytest.mark.asyncio
+async def test_final_edit_agent_records_selected_filter_metadata(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "draft.png"
+    _write_test_image(image_path)
+    agent = FinalEditAgent(
+        FinalEditToolRegistry(upscale_enabled=True),
+        upscale_enabled=True,
+    )
+    state = FinalEditImageState(
+        image_path=image_path,
+        working_dir=tmp_path / "edited",
+        plan=ImageEditPlan(
+            image_index=0,
+            content="cake",
+            strategy="warm cafe mood",
+            tools=["filter"],
+            params={"filter": {"filter_name": "Valencia"}},
+        ),
+    )
+
+    result = await agent.run(state)
+
+    assert result.fallback_to_original is False
+    assert result.executed_tools == ["filter", "upscale"]
+    assert result.metadata["selected_filter"] == "Valencia"
+    assert result.metadata["filter_applied"] is True
+    assert result.metadata["selected_filter_backend"] == "pilgram2"
+    assert result.metadata["selected_filter_callable"] == "valencia"
     assert result.output_path is not None
     output_image = cv2.imread(str(result.output_path))
     assert output_image is not None
-    assert output_image.shape[:2] == (16, 16)
+    assert output_image.shape[:2] == (32, 32)
+
+
+@pytest.mark.asyncio
+async def test_final_edit_agent_falls_back_when_filter_callable_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = tmp_path / "draft.png"
+    _write_test_image(image_path)
+    monkeypatch.setattr(
+        "app.services.final_edit_tools._import_pilgram2",
+        lambda: object(),
+    )
+    agent = FinalEditAgent(FinalEditToolRegistry())
+    state = FinalEditImageState(
+        image_path=image_path,
+        working_dir=tmp_path / "edited",
+        plan=ImageEditPlan(
+            image_index=0,
+            content="cake",
+            strategy="warm cafe mood",
+            tools=["filter"],
+            params={"filter": {"filter_name": "Valencia"}},
+        ),
+    )
+
+    result = await agent.run(state)
+
+    assert result.fallback_to_original is True
+    assert result.output_path == image_path
+    assert "tool_failed:filter" in (result.failure_reason or "")
 
 
 @pytest.mark.asyncio

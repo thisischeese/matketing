@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import shutil
 from dataclasses import dataclass
@@ -21,7 +20,7 @@ from app.services.final_edit_planner import (
     FinalEditPlannerClient,
     FinalEditSessionContext,
     ImageEditPlan,
-    build_default_final_edit_plan,
+    build_noop_final_edit_plan,
     build_final_edit_planner_client,
     load_final_edit_session_context,
     normalize_image_edit_plan,
@@ -41,7 +40,7 @@ STATUS_FAIL = "FRAME_EXTRACTED"
 STATUS_PHOTO_EDITED = "PHOTO_EDITED"
 logger = logging.getLogger(__name__)
 _PREVIEW_MAX_LENGTH = 120
-_PRE_UPSCALE_FILTER_TOOLS = {"color_grading", "sharpen", "background_blur"}
+_PRE_UPSCALE_FILTER_TOOLS = {"filter", "sharpen"}
 
 
 def _build_default_agent(tool_event_sink, upscale_enabled: bool):
@@ -126,10 +125,6 @@ def _attach_crop_context(
     )
 
 
-def _json_debug_value(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
-
-
 def _resolve_image_suffix(image_path: str, default_suffix: str = ".png") -> str:
     suffix = Path(normalize_s3_key(image_path)).suffix.lower()
     return suffix or default_suffix
@@ -158,23 +153,24 @@ def _ensure_filter_before_upscale(
     if has_filter_before_upscale:
         return plan
 
-    fallback_plan = build_default_final_edit_plan(
+    fallback_plan = ImageEditPlan(
         plan.image_index,
-        owner_persona=owner_persona,
         content=plan.content,
         strategy=plan.strategy,
-        upscale_enabled=upscale_enabled,
+        tools=["filter"],
+        params={"filter": {"filter_name": "Clarendon"}},
     )
-    fallback_params = dict(fallback_plan.params["color_grading"])
     merged_params = dict(plan.params)
-    merged_params["color_grading"] = dict(merged_params.get("color_grading", fallback_params))
+    merged_params["filter"] = dict(
+        merged_params.get("filter", fallback_plan.params["filter"])
+    )
     merged_params["upscale"] = dict(merged_params.get("upscale", {"scale": 2}))
 
     enforced_tools: list[str] = []
     inserted_filter = False
     for tool_name in plan.tools:
         if tool_name == "upscale" and not inserted_filter:
-            enforced_tools.append("color_grading")
+            enforced_tools.append("filter")
             inserted_filter = True
         enforced_tools.append(tool_name)
 
@@ -570,18 +566,14 @@ class FinalEditService:
                 fallback_reason = (
                     "planner_fallback" if planner_fallback else "plan_missing_for_image"
                 )
-                plan = build_default_final_edit_plan(
+                plan = build_noop_final_edit_plan(
                     image_index,
-                    owner_persona=context.owner_persona,
                     content="draft image",
                     strategy=(
-                        "Planner fallback; apply minimum color grading for a safe "
-                        "final-edit fallback."
+                        "Planner fallback; keep the original image unchanged."
                         if planner_fallback
-                        else "No plan returned for this image; apply minimum color "
-                        "grading for a safe final-edit fallback."
+                        else "No plan returned for this image; keep the original image unchanged."
                     ),
-                    upscale_enabled=self.upscale_enabled,
                 )
                 debug_fields[f"debug:plan_source:{image_index + 1}"] = fallback_reason
             else:
@@ -623,6 +615,25 @@ class FinalEditService:
             debug_fields[f"debug:crop_applied:{image_index + 1}"] = str(
                 bool(image_state.metadata.get("crop_applied"))
             ).lower()
+            debug_fields[f"debug:filter_applied:{image_index + 1}"] = str(
+                bool(image_state.metadata.get("filter_applied"))
+            ).lower()
+            selected_filter = image_state.metadata.get("selected_filter")
+            if selected_filter is not None:
+                debug_fields[f"debug:selected_filter:{image_index + 1}"] = str(
+                    selected_filter
+                )
+                debug_fields[f"debug:filter_source:{image_index + 1}"] = str(
+                    debug_fields.get(f"debug:plan_source:{image_index + 1}", "planner")
+                )
+            if image_state.metadata.get("selected_filter_backend") is not None:
+                debug_fields[
+                    f"debug:selected_filter_backend:{image_index + 1}"
+                ] = str(image_state.metadata.get("selected_filter_backend"))
+            if image_state.metadata.get("selected_filter_callable") is not None:
+                debug_fields[
+                    f"debug:selected_filter_callable:{image_index + 1}"
+                ] = str(image_state.metadata.get("selected_filter_callable"))
             if image_state.metadata.get("crop_reason") is not None:
                 debug_fields[f"debug:crop_reason:{image_index + 1}"] = str(
                     image_state.metadata.get("crop_reason")
@@ -630,40 +641,6 @@ class FinalEditService:
             if image_state.metadata.get("crop_output_ratio") is not None:
                 debug_fields[f"debug:crop_output_ratio:{image_index + 1}"] = str(
                     image_state.metadata.get("crop_output_ratio")
-                )
-            tone_debug = image_state.metadata.get("aesthetic_tone_debug")
-            debug_fields[f"debug:aesthetic_tone_applied:{image_index + 1}"] = str(
-                bool(image_state.metadata.get("aesthetic_tone_target_applied"))
-            ).lower()
-            debug_fields[
-                f"debug:aesthetic_spotlight_protection:{image_index + 1}"
-            ] = str(
-                bool(image_state.metadata.get("aesthetic_spotlight_protection_applied"))
-            ).lower()
-            if isinstance(tone_debug, dict):
-                debug_fields[f"debug:aesthetic_current_tone:{image_index + 1}"] = (
-                    _json_debug_value(tone_debug.get("current_tone", {}))
-                )
-                debug_fields[f"debug:aesthetic_target_tone:{image_index + 1}"] = (
-                    _json_debug_value(tone_debug.get("target_tone", {}))
-                )
-                debug_fields[f"debug:aesthetic_tolerance:{image_index + 1}"] = (
-                    _json_debug_value(
-                        {
-                            key: value.get("tolerance")
-                            for key, value in tone_debug.get("target_tone", {}).items()
-                            if isinstance(value, dict)
-                        }
-                    )
-                )
-                debug_fields[f"debug:aesthetic_tone_gap:{image_index + 1}"] = (
-                    _json_debug_value(tone_debug.get("gap_by_metric", {}))
-                )
-                debug_fields[f"debug:aesthetic_tone_skip:{image_index + 1}"] = (
-                    _json_debug_value(tone_debug.get("skip_by_metric", {}))
-                )
-                debug_fields[f"debug:aesthetic_applied_params:{image_index + 1}"] = (
-                    _json_debug_value(tone_debug.get("applied_params", {}))
                 )
             if image_state.fallback_to_original:
                 debug_fields[f"debug:image_fallback:{image_index + 1}"] = "true"
