@@ -9,22 +9,10 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 ENV_FILE = ROOT_DIR.parent / ".env"
 
 DEFAULT_KEYWORD_MODEL_SERVER_PORT = 8001
-DEFAULT_KEYWORD_MODEL_HOST_DIR = "./.models/keyword/exaone-3.5-7.8b-instruct/q4_k_m"
-DEFAULT_KEYWORD_MODEL_PATH = (
-    ROOT_DIR / "models" / "exaone-3.5-7.8b-instruct" / "q4_k_m" / "model.gguf"
-)
-DEFAULT_KEYWORD_MODEL_HF_REPO_ID = "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF"
-DEFAULT_KEYWORD_MODEL_HF_FILENAME = "EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf"
 DEFAULT_KEYWORD_MODEL_TIMEOUT_SECONDS = 60.0
 DEFAULT_KEYWORD_MODEL_HEALTH_ENDPOINT = "/health"
 
 DEFAULT_CAPTION_MODEL_SERVER_PORT = 8002
-DEFAULT_CAPTION_MODEL_HOST_DIR = "./.models/caption/exaone-4.0-32b/q4_k_m"
-DEFAULT_CAPTION_MODEL_PATH = (
-    ROOT_DIR / "models" / "exaone-4.0-32b" / "q4_k_m" / "model.gguf"
-)
-DEFAULT_CAPTION_MODEL_HF_REPO_ID = "LGAI-EXAONE/EXAONE-4.0-32B-GGUF"
-DEFAULT_CAPTION_MODEL_HF_FILENAME = "EXAONE-4.0-32B-Q4_K_M.gguf"
 DEFAULT_CAPTION_MODEL_TIMEOUT_SECONDS = 600.0
 DEFAULT_CAPTION_MODEL_HEALTH_ENDPOINT = "/health"
 DEFAULT_FINAL_EDIT_MODEL_SERVER_PORT = 49155
@@ -66,16 +54,6 @@ class LlamaModelClientSettings:
     temperature: float
     top_p: float
     enabled: bool
-
-
-@dataclass(frozen=True)
-class LlamaModelServerSettings:
-    host_dir: str
-    hf_repo_id: str
-    hf_filename: str
-    server_port: int
-    ctx_size: int
-    gpu_layers: int
 
 
 class Settings(BaseSettings):
@@ -124,10 +102,6 @@ class Settings(BaseSettings):
     )
     REALESRGAN_WEIGHTS_URL: str = DEFAULT_REALESRGAN_WEIGHTS_URL
 
-    KEYWORD_MODEL_HOST_DIR: str = DEFAULT_KEYWORD_MODEL_HOST_DIR
-    KEYWORD_MODEL_HF_REPO_ID: str = DEFAULT_KEYWORD_MODEL_HF_REPO_ID
-    KEYWORD_MODEL_HF_FILENAME: str = DEFAULT_KEYWORD_MODEL_HF_FILENAME
-    KEYWORD_MODEL_SERVER_PORT: int = DEFAULT_KEYWORD_MODEL_SERVER_PORT
     KEYWORD_MODEL_BASE_URL: str = (
         f"http://keyword-server:{DEFAULT_KEYWORD_MODEL_SERVER_PORT}"
     )
@@ -135,18 +109,12 @@ class Settings(BaseSettings):
     KEYWORD_MODEL_CHAT_ENDPOINT: str = "/v1/chat/completions"
     KEYWORD_MODEL_HEALTH_ENDPOINT: str = DEFAULT_KEYWORD_MODEL_HEALTH_ENDPOINT
     KEYWORD_MODEL_API_KEY: str | None = None
-    KEYWORD_MODEL_CTX_SIZE: int = 2048
-    KEYWORD_MODEL_GPU_LAYERS: int = 20
     KEYWORD_MODEL_MAX_TOKENS: int = 64
     KEYWORD_MODEL_TEMPERATURE: float = 0.1
     KEYWORD_MODEL_TOP_P: float = 0.9
     KEYWORD_MODEL_ENABLED: bool = True
     KEYWORD_MODEL_TIMEOUT_SECONDS: float = DEFAULT_KEYWORD_MODEL_TIMEOUT_SECONDS
 
-    CAPTION_MODEL_HOST_DIR: str = DEFAULT_CAPTION_MODEL_HOST_DIR
-    CAPTION_MODEL_HF_REPO_ID: str = DEFAULT_CAPTION_MODEL_HF_REPO_ID
-    CAPTION_MODEL_HF_FILENAME: str = DEFAULT_CAPTION_MODEL_HF_FILENAME
-    CAPTION_MODEL_SERVER_PORT: int = DEFAULT_CAPTION_MODEL_SERVER_PORT
     CAPTION_MODEL_BASE_URL: str = (
         f"http://caption-server:{DEFAULT_CAPTION_MODEL_SERVER_PORT}"
     )
@@ -154,8 +122,6 @@ class Settings(BaseSettings):
     CAPTION_MODEL_CHAT_ENDPOINT: str = "/v1/chat/completions"
     CAPTION_MODEL_HEALTH_ENDPOINT: str = DEFAULT_CAPTION_MODEL_HEALTH_ENDPOINT
     CAPTION_MODEL_API_KEY: str | None = None
-    CAPTION_MODEL_CTX_SIZE: int = 2048
-    CAPTION_MODEL_GPU_LAYERS: int = 20
     CAPTION_MODEL_MAX_TOKENS: int = 512
     CAPTION_MODEL_TEMPERATURE: float = 1
     CAPTION_MODEL_TOP_P: float = 0.9
@@ -309,30 +275,6 @@ class Settings(BaseSettings):
             temperature=self.FINAL_EDIT_MODEL_TEMPERATURE,
             top_p=self.FINAL_EDIT_MODEL_TOP_P,
             enabled=self.FINAL_EDIT_MODEL_ENABLED,
-        )
-
-    @computed_field
-    @property
-    def keyword_model_server(self) -> LlamaModelServerSettings:
-        return LlamaModelServerSettings(
-            host_dir=self.KEYWORD_MODEL_HOST_DIR,
-            hf_repo_id=self.KEYWORD_MODEL_HF_REPO_ID,
-            hf_filename=self.KEYWORD_MODEL_HF_FILENAME,
-            server_port=self.KEYWORD_MODEL_SERVER_PORT,
-            ctx_size=self.KEYWORD_MODEL_CTX_SIZE,
-            gpu_layers=self.KEYWORD_MODEL_GPU_LAYERS,
-        )
-
-    @computed_field
-    @property
-    def caption_model_server(self) -> LlamaModelServerSettings:
-        return LlamaModelServerSettings(
-            host_dir=self.CAPTION_MODEL_HOST_DIR,
-            hf_repo_id=self.CAPTION_MODEL_HF_REPO_ID,
-            hf_filename=self.CAPTION_MODEL_HF_FILENAME,
-            server_port=self.CAPTION_MODEL_SERVER_PORT,
-            ctx_size=self.CAPTION_MODEL_CTX_SIZE,
-            gpu_layers=self.CAPTION_MODEL_GPU_LAYERS,
         )
 
 
