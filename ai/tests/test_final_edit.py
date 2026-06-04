@@ -15,6 +15,7 @@ from app.bootstrap import _initialize_final_edit_service
 from app.services.final_edit import FinalEditResult, FinalEditService
 from app.services.final_edit_runtime import FinalEditUnavailableError
 from app.services.final_edit_planner import (
+    CarouselOrderPlan,
     FinalEditPlanningError,
     FinalEditSessionContext,
     ImageEditPlan,
@@ -22,6 +23,8 @@ from app.services.final_edit_planner import (
 from app.services.sessions import session_key
 from tests.utils.session_support import (
     CapturingFinalUploader,
+    DelayedCapturingFinalUploader,
+    DelayedRecordingDraftDownloader,
     FailOnCallPlannerClient,
     FakeFinalEditService,
     FakeUpscaler,
@@ -30,6 +33,7 @@ from tests.utils.session_support import (
     FailingUploader,
     FallbackAgent,
     RecordingPlannerClient,
+    RecordingDraftDownloader,
     StubDraftDownloader,
     VALID_PAYLOAD,
 )
@@ -417,9 +421,9 @@ def test_final_edit_service_records_planner_failure_details(
 ) -> None:
     class RawPreviewFailingPlannerClient:
         def __init__(self) -> None:
-            self.last_raw_output = '[{"image_index":0,"content":"cake"}]'
+            self.last_raw_output = '{"image_plans":[{"image_index":0,"content":"cake"}],"carousel_order":null}'
 
-        async def build_plans(self, image_paths, context) -> list[ImageEditPlan]:
+        async def build_batch_plan(self, image_paths, context):
             raise FinalEditPlanningError("Planner payload is missing fields: ['params']")
 
     uploader = CapturingFinalUploader()
@@ -450,9 +454,8 @@ def test_final_edit_service_records_planner_failure_details(
         result.debug_fields["debug:planner_failure_message"]
         == "Planner payload is missing fields: ['params']"
     )
-    assert result.debug_fields["debug:planner_failure_image_index"] == "0"
     assert result.debug_fields["debug:planner_failure_raw_preview"] == (
-        '[{"image_index":0,"content":"cake"}]'
+        '{"image_plans":[{"image_index":0,"content":"cake"}],"carousel_order":null}'
     )
     assert result.debug_fields["debug:planner_response_received"] == "false"
 
@@ -616,21 +619,21 @@ def test_final_edit_service_calls_planner_once_per_image_and_remaps_indexes(
                     params={"denoise": {"strength": 0.4}},
                 )
             ],
-            [
-                ImageEditPlan(
-                    image_index=0,
-                    content="second image",
-                    strategy="sharpen second",
-                    tools=["sharpen"],
+                [
+                    ImageEditPlan(
+                        image_index=1,
+                        content="second image",
+                        strategy="sharpen second",
+                        tools=["sharpen"],
                     params={"sharpen": {"strength": 0.3}},
                 )
             ],
-            [
-                ImageEditPlan(
-                    image_index=0,
-                    content="third image",
-                    strategy="color grade third",
-                    tools=["color_grading"],
+                [
+                    ImageEditPlan(
+                        image_index=2,
+                        content="third image",
+                        strategy="color grade third",
+                        tools=["color_grading"],
                     params={"color_grading": {"contrast": -6}},
                 )
             ],
@@ -662,11 +665,11 @@ def test_final_edit_service_calls_planner_once_per_image_and_remaps_indexes(
     )
 
     assert result.status == "PHOTO_EDITED"
-    assert len(planner_client.calls) == 3
-    assert all(len(call) == 1 for call in planner_client.calls)
+    assert len(planner_client.calls) == 1
+    assert len(planner_client.calls[0]) == 3
     assert planner_client.calls[0][0].endswith("draft-001.png")
-    assert planner_client.calls[1][0].endswith("draft-002.png")
-    assert planner_client.calls[2][0].endswith("draft-003.png")
+    assert planner_client.calls[0][1].endswith("draft-002.png")
+    assert planner_client.calls[0][2].endswith("draft-003.png")
     assert result.debug_fields is not None
     assert result.debug_fields["debug:planner_fallback"] == "false"
     assert result.debug_fields["debug:planned_image_count"] == "3"
@@ -676,7 +679,148 @@ def test_final_edit_service_calls_planner_once_per_image_and_remaps_indexes(
     assert result.debug_fields["debug:tools:3"] == "color_grading"
 
 
-def test_final_edit_service_falls_back_only_failed_images_when_any_planner_call_fails(
+def test_final_edit_service_preserves_download_order_with_parallel_downloads(
+    tmp_path: Path,
+    service_loop,
+) -> None:
+    uploader = CapturingFinalUploader()
+    downloader = DelayedRecordingDraftDownloader(
+        {
+            "/ai-drafts/session-download-order-1/draft-001.png": 0.03,
+            "/ai-drafts/session-download-order-1/draft-002.png": 0.0,
+            "/ai-drafts/session-download-order-1/draft-003.png": 0.01,
+        }
+    )
+    service = FinalEditService(
+        downloader=downloader,
+        uploader=uploader,
+        temp_root=tmp_path,
+        planner_client=FailingPlannerClient(),
+        upscale_enabled=False,
+    )
+
+    drafts = [
+        "/ai-drafts/session-download-order-1/draft-001.png",
+        "/ai-drafts/session-download-order-1/draft-002.png",
+        "/ai-drafts/session-download-order-1/draft-003.png",
+    ]
+    result = _run_service(
+        service_loop,
+        service.edit_and_upload(
+            session_id="session-download-order-1",
+            drafts=drafts,
+            context=FinalEditSessionContext(caption="cake", keywords=["dessert"]),
+        ),
+    )
+
+    assert result.status == "PHOTO_EDITED"
+    assert result.results == [
+        "/ai-finals/session-download-order-1/final-001.png",
+        "/ai-finals/session-download-order-1/final-002.png",
+        "/ai-finals/session-download-order-1/final-003.png",
+    ]
+    assert result.debug_fields is not None
+    assert result.debug_fields["debug:downloaded_draft_count"] == "3"
+    assert result.debug_fields["debug:download_task_count"] == "3"
+    assert result.debug_fields["debug:upload_task_count"] == "3"
+    assert result.debug_fields["debug:uploaded_final_count"] == "3"
+    assert result.debug_fields["debug:total_download_elapsed_ms"].isdigit()
+    assert result.debug_fields["debug:total_upload_elapsed_ms"].isdigit()
+    assert result.debug_fields["debug:download_elapsed_ms:1"].isdigit()
+    assert result.debug_fields["debug:download_elapsed_ms:2"].isdigit()
+    assert result.debug_fields["debug:download_elapsed_ms:3"].isdigit()
+
+
+def test_final_edit_service_preserves_upload_result_order_with_parallel_uploads(
+    tmp_path: Path,
+    service_loop,
+) -> None:
+    uploader = DelayedCapturingFinalUploader({1: 0.03, 2: 0.0, 3: 0.01})
+    service = FinalEditService(
+        downloader=StubDraftDownloader(),
+        uploader=uploader,
+        temp_root=tmp_path,
+        planner_client=FailingPlannerClient(),
+        upscale_enabled=False,
+    )
+
+    drafts = [
+        "/ai-drafts/session-upload-order-1/draft-001.png",
+        "/ai-drafts/session-upload-order-1/draft-002.png",
+        "/ai-drafts/session-upload-order-1/draft-003.png",
+    ]
+    result = _run_service(
+        service_loop,
+        service.edit_and_upload(
+            session_id="session-upload-order-1",
+            drafts=drafts,
+            context=FinalEditSessionContext(caption="cake", keywords=["dessert"]),
+        ),
+    )
+
+    assert result.status == "PHOTO_EDITED"
+    assert result.results == [
+        "/ai-finals/session-upload-order-1/final-001.png",
+        "/ai-finals/session-upload-order-1/final-002.png",
+        "/ai-finals/session-upload-order-1/final-003.png",
+    ]
+    assert result.debug_fields is not None
+    assert result.debug_fields["debug:uploaded_final_count"] == "3"
+    assert result.debug_fields["debug:upload_elapsed_ms:1"].isdigit()
+    assert result.debug_fields["debug:upload_elapsed_ms:2"].isdigit()
+    assert result.debug_fields["debug:upload_elapsed_ms:3"].isdigit()
+
+
+@pytest.mark.asyncio
+async def test_final_edit_s3_helpers_reuse_single_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build_client_calls: list[str] = []
+
+    class FakeS3Client:
+        def __init__(self) -> None:
+            self.download_calls: list[tuple[str, str, str]] = []
+            self.upload_calls: list[tuple[str, str, str]] = []
+            self.delete_calls: list[tuple[str, str]] = []
+
+        def download_file(self, bucket, key, destination) -> None:
+            self.download_calls.append((bucket, key, destination))
+            Path(destination).parent.mkdir(parents=True, exist_ok=True)
+            Path(destination).write_bytes(b"draft")
+
+        def upload_file(self, source, bucket, key, ExtraArgs=None) -> None:
+            self.upload_calls.append((source, bucket, key))
+
+        def delete_object(self, Bucket, Key) -> None:
+            self.delete_calls.append((Bucket, Key))
+
+    fake_client = FakeS3Client()
+
+    def fake_build_s3_client():
+        build_client_calls.append("called")
+        return fake_client
+
+    monkeypatch.setattr("app.services.final_edit.build_s3_client", fake_build_s3_client)
+
+    downloader = FinalEditService.__init__.__globals__["S3DraftImageDownloader"]()
+    uploader = FinalEditService.__init__.__globals__["S3FinalImageUploader"]()
+    draft_path = tmp_path / "draft-001.png"
+    final_path = tmp_path / "final-001.png"
+    final_path.write_bytes(b"final")
+
+    await downloader.download_draft("/ai-drafts/session-client-reuse-1/draft-001.png", draft_path)
+    await downloader.download_draft("/ai-drafts/session-client-reuse-1/draft-002.png", tmp_path / "draft-002.png")
+    uploaded_path = await uploader.upload_final("session-client-reuse-1", final_path, 1)
+    await uploader.delete_final(uploaded_path)
+
+    assert len(build_client_calls) == 2
+    assert len(fake_client.download_calls) == 2
+    assert len(fake_client.upload_calls) == 1
+    assert len(fake_client.delete_calls) == 1
+
+
+def test_final_edit_service_falls_back_for_all_images_when_batch_planner_call_fails(
     tmp_path: Path,
     service_loop,
 ) -> None:
@@ -711,7 +855,7 @@ def test_final_edit_service_falls_back_only_failed_images_when_any_planner_call_
                 )
             ],
         ],
-        fail_on_call=1,
+        fail_on_call=0,
     )
     service = FinalEditService(
         downloader=StubDraftDownloader(),
@@ -739,22 +883,266 @@ def test_final_edit_service_falls_back_only_failed_images_when_any_planner_call_
     )
 
     assert result.status == "PHOTO_EDITED"
-    assert len(planner_client.calls) == 3
-    assert all(len(call) == 1 for call in planner_client.calls)
+    assert len(planner_client.calls) == 1
+    assert len(planner_client.calls[0]) == 3
     assert planner_client.calls[0][0].endswith("draft-001.png")
-    assert planner_client.calls[1][0].endswith("draft-002.png")
-    assert planner_client.calls[2][0].endswith("draft-003.png")
+    assert planner_client.calls[0][1].endswith("draft-002.png")
+    assert planner_client.calls[0][2].endswith("draft-003.png")
     assert result.debug_fields is not None
     assert result.debug_fields["debug:planner_fallback"] == "true"
-    assert result.debug_fields["debug:planned_image_count"] == "2"
-    assert result.debug_fields["debug:planned_indexes"] == "0,2"
-    assert result.debug_fields["debug:tools:1"] == "denoise"
+    assert result.debug_fields["debug:planned_image_count"] == "0"
+    assert result.debug_fields["debug:planned_indexes"] == ""
+    assert result.debug_fields["debug:plan_source:1"] == "planner_fallback"
     assert result.debug_fields["debug:plan_source:2"] == "planner_fallback"
+    assert result.debug_fields["debug:plan_source:3"] == "planner_fallback"
+    assert result.debug_fields["debug:tools:1"] == ""
     assert result.debug_fields["debug:tools:2"] == ""
-    assert result.debug_fields["debug:tools:3"] == "sharpen"
-    assert result.debug_fields["debug:planner_failure_image_index"] == "1"
-    assert result.debug_fields["debug:planner_failure_type:2"] == "RuntimeError"
-    assert result.debug_fields["debug:planner_failure_message:2"] == "planner_failed"
+    assert result.debug_fields["debug:tools:3"] == ""
+    assert result.debug_fields["debug:planner_failure_type"] == "RuntimeError"
+    assert result.debug_fields["debug:planner_failure_message"] == "planner_failed"
+
+
+def test_final_edit_service_reorders_three_images_before_upload(
+    tmp_path: Path,
+    service_loop,
+) -> None:
+    uploader = CapturingFinalUploader()
+    planner_client = RecordingPlannerClient(
+        [[], [], []],
+        reorder_plan=CarouselOrderPlan(
+            ordered_image_indexes=[2, 0, 1],
+            hook_scores=[0.93, 0.74, 0.58],
+            overall_confidence=0.88,
+            reason="The third image is the strongest hook, the first is the second strongest hook, and the second is the weakest hook.",
+        ),
+    )
+    service = FinalEditService(
+        downloader=StubDraftDownloader(),
+        uploader=uploader,
+        temp_root=tmp_path,
+        planner_client=planner_client,
+        upscale_enabled=False,
+    )
+
+    drafts = [
+        "/ai-drafts/session-reorder-1/draft-001.png",
+        "/ai-drafts/session-reorder-1/draft-002.png",
+        "/ai-drafts/session-reorder-1/draft-003.png",
+    ]
+    result = _run_service(
+        service_loop,
+        service.edit_and_upload(
+            session_id="session-reorder-1",
+            drafts=drafts,
+            context=FinalEditSessionContext(
+                caption="cozy dessert carousel",
+                keywords=["cake", "texture", "cafe"],
+            ),
+        ),
+    )
+
+    assert result.status == "PHOTO_EDITED"
+    assert result.results == [
+        "/ai-finals/session-reorder-1/final-001.png",
+        "/ai-finals/session-reorder-1/final-002.png",
+        "/ai-finals/session-reorder-1/final-003.png",
+    ]
+    assert len(planner_client.calls) == 1
+    assert len(planner_client.calls[0]) == 3
+    assert planner_client.calls[0][0].endswith("draft-001.png")
+    assert planner_client.calls[0][1].endswith("draft-002.png")
+    assert planner_client.calls[0][2].endswith("draft-003.png")
+    assert uploader.source_paths[0].endswith("draft-003.png")
+    assert uploader.source_paths[1].endswith("draft-001.png")
+    assert uploader.source_paths[2].endswith("draft-002.png")
+    assert result.debug_fields is not None
+    assert result.debug_fields["debug:reorder_attempted"] == "true"
+    assert result.debug_fields["debug:reorder_applied"] == "true"
+    assert result.debug_fields["debug:reorder_order"] == "2,0,1"
+    assert result.debug_fields["debug:reorder_hook_scores"] == "0.93,0.74,0.58"
+    assert result.debug_fields["debug:reorder_confidence"] == "0.88"
+    assert (
+        result.debug_fields["debug:reorder_mapping:1"]
+        == "original=3,slot=1,uploaded=/ai-finals/session-reorder-1/final-001.png"
+    )
+    assert (
+        result.debug_fields["debug:reorder_mapping:2"]
+        == "original=1,slot=2,uploaded=/ai-finals/session-reorder-1/final-002.png"
+    )
+    assert (
+        result.debug_fields["debug:reorder_mapping:3"]
+        == "original=2,slot=3,uploaded=/ai-finals/session-reorder-1/final-003.png"
+    )
+
+
+def test_final_edit_service_keeps_original_order_when_reorder_confidence_is_low(
+    tmp_path: Path,
+    service_loop,
+) -> None:
+    uploader = CapturingFinalUploader()
+    planner_client = RecordingPlannerClient(
+        [[], [], []],
+        reorder_plan=CarouselOrderPlan(
+            ordered_image_indexes=[2, 0, 1],
+            hook_scores=[0.69, 0.61, 0.54],
+            overall_confidence=0.69,
+            reason="Not confident enough.",
+        ),
+    )
+    service = FinalEditService(
+        downloader=StubDraftDownloader(),
+        uploader=uploader,
+        temp_root=tmp_path,
+        planner_client=planner_client,
+        upscale_enabled=False,
+    )
+
+    drafts = [
+        "/ai-drafts/session-reorder-low-1/draft-001.png",
+        "/ai-drafts/session-reorder-low-1/draft-002.png",
+        "/ai-drafts/session-reorder-low-1/draft-003.png",
+    ]
+    result = _run_service(
+        service_loop,
+        service.edit_and_upload(
+            session_id="session-reorder-low-1",
+            drafts=drafts,
+            context=FinalEditSessionContext(
+                caption="cozy dessert carousel",
+                keywords=["cake", "texture", "cafe"],
+            ),
+        ),
+    )
+
+    assert result.status == "PHOTO_EDITED"
+    assert uploader.source_paths[0].endswith("draft-001.png")
+    assert uploader.source_paths[1].endswith("draft-002.png")
+    assert uploader.source_paths[2].endswith("draft-003.png")
+    assert result.debug_fields is not None
+    assert result.debug_fields["debug:reorder_attempted"] == "true"
+    assert result.debug_fields["debug:reorder_applied"] == "false"
+    assert result.debug_fields["debug:reorder_skip_reason"] == "low_confidence"
+    assert (
+        result.debug_fields["debug:reorder_mapping:1"]
+        == "original=1,slot=1,uploaded=/ai-finals/session-reorder-low-1/final-001.png"
+    )
+
+
+def test_final_edit_service_skips_reorder_when_image_count_is_not_three(
+    tmp_path: Path,
+    service_loop,
+) -> None:
+    uploader = CapturingFinalUploader()
+    planner_client = RecordingPlannerClient([[], []])
+    service = FinalEditService(
+        downloader=StubDraftDownloader(),
+        uploader=uploader,
+        temp_root=tmp_path,
+        planner_client=planner_client,
+        upscale_enabled=False,
+    )
+
+    result = _run_service(
+        service_loop,
+        service.edit_and_upload(
+            session_id="session-reorder-skip-1",
+            drafts=[
+                "/ai-drafts/session-reorder-skip-1/draft-001.png",
+                "/ai-drafts/session-reorder-skip-1/draft-002.png",
+            ],
+            context=FinalEditSessionContext(
+                caption="cozy dessert carousel",
+                keywords=["cake", "texture"],
+            ),
+        ),
+    )
+
+    assert result.status == "PHOTO_EDITED"
+    assert len(planner_client.calls) == 1
+    assert result.debug_fields is not None
+    assert result.debug_fields["debug:reorder_attempted"] == "false"
+    assert result.debug_fields["debug:reorder_applied"] == "false"
+
+
+def test_final_edit_service_logs_reorder_failure_details(
+    tmp_path: Path,
+    service_loop,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ReorderFailingPlannerClient(RecordingPlannerClient):
+        def __init__(self) -> None:
+            super().__init__(
+                [[], [], []],
+                reorder_error_message="ordered_image_indexes must be a permutation of [0, 1, 2].",
+                reorder_raw_output=(
+                '{"ordered_image_indexes":[0,0,2],"hook_scores":[0.91,0.73,0.52],'
+                '"overall_confidence":0.91,"reason":"invalid duplicate order"}'
+                ),
+            )
+
+    uploader = CapturingFinalUploader()
+    planner_client = ReorderFailingPlannerClient()
+    service = FinalEditService(
+        downloader=StubDraftDownloader(),
+        uploader=uploader,
+        temp_root=tmp_path,
+        planner_client=planner_client,
+        upscale_enabled=False,
+    )
+    logged_warnings: list[dict[str, object]] = []
+
+    def fake_warning(message: str, *, extra=None, **kwargs) -> None:
+        logged_warnings.append(
+            {
+                "message": message,
+                "extra": extra or {},
+                "kwargs": kwargs,
+            }
+        )
+
+    monkeypatch.setattr("app.services.final_edit.logger.warning", fake_warning)
+
+    result = _run_service(
+        service_loop,
+        service.edit_and_upload(
+            session_id="session-reorder-failure-1",
+            drafts=[
+                "/ai-drafts/session-reorder-failure-1/draft-001.png",
+                "/ai-drafts/session-reorder-failure-1/draft-002.png",
+                "/ai-drafts/session-reorder-failure-1/draft-003.png",
+            ],
+            context=FinalEditSessionContext(
+                caption="cozy dessert carousel",
+                keywords=["cake", "texture", "cafe"],
+            ),
+        ),
+    )
+
+    assert result.status == "PHOTO_EDITED"
+    assert result.debug_fields is not None
+    assert result.debug_fields["debug:reorder_applied"] == "false"
+    assert result.debug_fields["debug:reorder_failure_type"] == "FinalEditPlanningError"
+    assert (
+        result.debug_fields["debug:reorder_failure_message"]
+        == "ordered_image_indexes must be a permutation of [0, 1, 2]."
+    )
+    assert "debug:reorder_failure_raw_preview" in result.debug_fields
+
+    reorder_warning = next(
+        warning
+        for warning in logged_warnings
+        if warning["message"]
+        == "Final edit carousel reorder failed. Preserving original order."
+    )
+    extra = reorder_warning["extra"]
+    assert extra["event"] == "final_edit.reorder.completed"
+    assert extra["outcome"] == "fallback"
+    assert extra["error_type"] == "FinalEditPlanningError"
+    assert (
+        extra["reorder_failure_message"]
+        == "ordered_image_indexes must be a permutation of [0, 1, 2]."
+    )
+    assert "ordered_image_indexes" in extra["reorder_failure_raw_preview"]
 
 
 def test_final_edit_service_applies_crop_and_records_debug_fields(

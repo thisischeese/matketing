@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable
 from pathlib import Path
@@ -21,10 +22,18 @@ from app.services.canonical_keyword_resolver import (
 )
 from app.services.final_edit import FinalEditResult
 from app.services.final_edit_agent import FinalEditImageState
-from app.services.final_edit_planner import ImageEditPlan
+from app.services.final_edit_planner import (
+    CarouselOrderPlan,
+    FinalEditBatchPlan,
+    ImageEditPlan,
+)
 from app.services.frame_extraction import ExtractFramesResult
 from app.services.keyword_extraction import KeywordExtractionResult
 from app.services.menu_promotion_context import MatchedMenuContext
+from app.services.reference_caption_retriever import (
+    ReferenceCaptionRetrievalResult,
+    RetrievedReferenceCaption,
+)
 from app.services.weather_tags import (
     PRECIP_CLEAR,
     PRECIP_CLOUDY,
@@ -282,11 +291,15 @@ class FakeCaptionGenerationService:
             {
                 "draft_keywords": list(request.draft_keywords),
                 "owner_persona": request.owner_persona,
+                "context_routing_variant": request.context_routing_variant,
+                "context_profile": request.context_profile,
                 "today": request.today,
+                "utterance": request.utterance,
                 "weather_tags": list(request.weather_tags),
                 "menu_name": request.menu_name,
                 "menu_description": request.menu_description,
                 "matched_keyword": request.matched_keyword,
+                "prompt_context": request.prompt_context,
             }
         )
         if self.error is not None:
@@ -302,11 +315,15 @@ class FakeCaptionGenerationService:
             {
                 "draft_keywords": list(request.draft_keywords),
                 "owner_persona": request.owner_persona,
+                "context_routing_variant": request.context_routing_variant,
+                "context_profile": request.context_profile,
                 "today": request.today,
+                "utterance": request.utterance,
                 "weather_tags": list(request.weather_tags),
                 "menu_name": request.menu_name,
                 "menu_description": request.menu_description,
                 "matched_keyword": request.matched_keyword,
+                "prompt_context": request.prompt_context,
                 "fallback_source": fallback_source,
             }
         )
@@ -357,10 +374,77 @@ class FakeMenuPromotionContextService:
         return self.result
 
 
+class FakeReferenceCaptionRetrieverService:
+    def __init__(
+        self,
+        *,
+        references: list[str] | None = None,
+        fallback_reason: str | None = None,
+        candidate_count: int = 0,
+    ) -> None:
+        self.references = list(references or [])
+        self.fallback_reason = fallback_reason
+        self.candidate_count = candidate_count
+        self.calls: list[dict[str, object]] = []
+
+    async def retrieve(
+        self,
+        *,
+        owner_persona: str,
+        utterance: str,
+        canonical_matches: list[CanonicalKeywordMatch],
+        max_references: int | None = None,
+    ) -> ReferenceCaptionRetrievalResult:
+        self.calls.append(
+            {
+                "owner_persona": owner_persona,
+                "utterance": utterance,
+                "canonical_matches": list(canonical_matches),
+                "max_references": max_references,
+            }
+        )
+        return ReferenceCaptionRetrievalResult(
+            references=[
+                RetrievedReferenceCaption(
+                    caption_id=index + 1,
+                    caption_content=reference,
+                    score=0.91 - (index * 0.05),
+                )
+                for index, reference in enumerate(self.references)
+            ],
+            fallback_reason=self.fallback_reason,
+            candidate_count=self.candidate_count,
+        )
+
+
 class StubDraftDownloader:
     is_configured = True
 
     async def download_draft(self, draft_key: str, destination) -> None:
+        _write_test_jpeg(destination)
+
+
+class RecordingDraftDownloader:
+    is_configured = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def download_draft(self, draft_key: str, destination) -> None:
+        self.calls.append((draft_key, str(destination)))
+        _write_test_jpeg(destination)
+
+
+class DelayedRecordingDraftDownloader:
+    is_configured = True
+
+    def __init__(self, delays_by_key: dict[str, float]) -> None:
+        self.delays_by_key = delays_by_key
+        self.calls: list[tuple[str, str]] = []
+
+    async def download_draft(self, draft_key: str, destination) -> None:
+        self.calls.append((draft_key, str(destination)))
+        await asyncio.sleep(self.delays_by_key.get(draft_key, 0.0))
         _write_test_jpeg(destination)
 
 
@@ -381,10 +465,31 @@ class CapturingFinalUploader:
         return None
 
 
+class DelayedCapturingFinalUploader:
+    is_configured = True
+
+    def __init__(self, delays_by_index: dict[int, float]) -> None:
+        self.delays_by_index = delays_by_index
+        self.uploaded_paths: list[str] = []
+        self.source_paths: list[str] = []
+
+    async def upload_final(self, session_id: str, image_path, final_index: int) -> str:
+        self.source_paths.append(str(image_path))
+        await asyncio.sleep(self.delays_by_index.get(final_index, 0.0))
+        uploaded_path = f"/ai-finals/{session_id}/final-{final_index:03d}.png"
+        self.uploaded_paths.append(uploaded_path)
+        return uploaded_path
+
+    async def delete_final(self, uploaded_path: str) -> None:
+        return None
+
+
 class FailingPlannerClient:
     last_raw_output = ""
+    last_reorder_raw_output = ""
+    last_reorder_error_message = None
 
-    async def build_plans(self, image_paths, context) -> list[ImageEditPlan]:
+    async def build_batch_plan(self, image_paths, context) -> FinalEditBatchPlan:
         raise RuntimeError("planner_failed")
 
 
@@ -398,32 +503,82 @@ class FallbackAgent:
 
 
 class FakePlannerClient:
-    def __init__(self, plans: list[ImageEditPlan]) -> None:
+    def __init__(
+        self,
+        plans: list[ImageEditPlan],
+        *,
+        reorder_plan: CarouselOrderPlan | None = None,
+        reorder_error_message: str | None = None,
+        reorder_raw_output: str | None = None,
+    ) -> None:
         self.plans = plans
+        self.reorder_plan = reorder_plan
+        self.reorder_error_message = reorder_error_message
         self.last_raw_output = (
-            '[{"image_index":0,"content":"cake","strategy":"warm cafe mood",'
-            '"tools":["filter"],"params":{"filter":{"filter_name":"Clarendon"}}}]'
+            '{"image_plans":[{"image_index":0,"content":"cake","strategy":"warm cafe mood",'
+            '"tools":["filter"],"params":{"filter":{"filter_name":"Clarendon"}}}],"carousel_order":null}'
         )
+        self.last_reorder_raw_output = reorder_raw_output
+        self.last_reorder_error_message = reorder_error_message
 
-    async def build_plans(self, image_paths, context) -> list[ImageEditPlan]:
-        return self.plans
+    async def build_batch_plan(self, image_paths, context) -> FinalEditBatchPlan:
+        reorder_plan = self.reorder_plan
+        if reorder_plan is None and len(image_paths) == 3 and self.reorder_error_message is None:
+            reorder_plan = CarouselOrderPlan(
+                ordered_image_indexes=[0, 1, 2],
+                hook_scores=[0.9, 0.7, 0.5],
+                overall_confidence=0.0,
+                reason="default identity order",
+            )
+        return FinalEditBatchPlan(
+            image_plans=self.plans,
+            carousel_order=reorder_plan,
+            carousel_order_error_message=self.reorder_error_message,
+            carousel_order_raw_output=self.last_reorder_raw_output,
+        )
 
 
 class RecordingPlannerClient:
-    def __init__(self, plans_by_call: list[list[ImageEditPlan]]) -> None:
+    def __init__(
+        self,
+        plans_by_call: list[list[ImageEditPlan]],
+        *,
+        reorder_plan: CarouselOrderPlan | None = None,
+        reorder_error_message: str | None = None,
+        reorder_raw_output: str | None = None,
+    ) -> None:
         self.plans_by_call = plans_by_call
+        self.reorder_plan = reorder_plan
+        self.reorder_error_message = reorder_error_message
         self.calls: list[list[str]] = []
         self.last_raw_output = (
-            '[{"image_index":0,"content":"cake","strategy":"warm cafe mood",'
-            '"tools":["filter"],"params":{"filter":{"filter_name":"Clarendon"}}}]'
+            '{"image_plans":[{"image_index":0,"content":"cake","strategy":"warm cafe mood",'
+            '"tools":["filter"],"params":{"filter":{"filter_name":"Clarendon"}}}],"carousel_order":null}'
         )
+        self.last_reorder_raw_output = reorder_raw_output
+        self.last_reorder_error_message = reorder_error_message
 
-    async def build_plans(self, image_paths, context) -> list[ImageEditPlan]:
+    async def build_batch_plan(self, image_paths, context) -> FinalEditBatchPlan:
         self.calls.append(list(image_paths))
-        call_index = len(self.calls) - 1
-        if call_index >= len(self.plans_by_call):
-            return []
-        return self.plans_by_call[call_index]
+        flattened_plans = [
+            plan
+            for plans in self.plans_by_call
+            for plan in plans
+        ]
+        reorder_plan = self.reorder_plan
+        if reorder_plan is None and len(image_paths) == 3 and self.reorder_error_message is None:
+            reorder_plan = CarouselOrderPlan(
+                ordered_image_indexes=[0, 1, 2],
+                hook_scores=[0.9, 0.7, 0.5],
+                overall_confidence=0.0,
+                reason="default identity order",
+            )
+        return FinalEditBatchPlan(
+            image_plans=flattened_plans,
+            carousel_order=reorder_plan,
+            carousel_order_error_message=self.reorder_error_message,
+            carousel_order_raw_output=self.last_reorder_raw_output,
+        )
 
 
 class FailOnCallPlannerClient(RecordingPlannerClient):
@@ -436,14 +591,25 @@ class FailOnCallPlannerClient(RecordingPlannerClient):
         super().__init__(plans_by_call)
         self.fail_on_call = fail_on_call
 
-    async def build_plans(self, image_paths, context) -> list[ImageEditPlan]:
+    async def build_batch_plan(self, image_paths, context) -> FinalEditBatchPlan:
         self.calls.append(list(image_paths))
         call_index = len(self.calls) - 1
         if call_index == self.fail_on_call:
             raise RuntimeError("planner_failed")
-        if call_index >= len(self.plans_by_call):
-            return []
-        return self.plans_by_call[call_index]
+        flattened_plans = [
+            plan
+            for plans in self.plans_by_call
+            for plan in plans
+        ]
+        return FinalEditBatchPlan(
+            image_plans=flattened_plans,
+            carousel_order=CarouselOrderPlan(
+                ordered_image_indexes=[0, 1, 2],
+                hook_scores=[0.9, 0.7, 0.5],
+                overall_confidence=0.0,
+                reason="default identity order",
+            ) if len(image_paths) == 3 else None,
+        )
 
 
 class FailingUploader:

@@ -11,3 +11,7 @@ data/**/
 models/
 *.gguf
 *.md
+*.safetensors
+*.pt
+*.pth
+*.h5

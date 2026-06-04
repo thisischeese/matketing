@@ -1,0 +1,119 @@
+{
+  "metadata": {
+    "iterations": 1,
+    "store_id": "663c31d7-87c6-4b83-bc0b-756e84a7a3a7",
+    "owner_persona": "aesthetic",
+    "request_date": "2026-06-02",
+    "caption_model_base_url": "http://host.docker.internal:8000",
+    "caption_model_timeout_seconds": 600.0
+  },
+  "grouped_summary": [
+    {
+      "scenario": "basic",
+      "variant": "baseline",
+      "expected_profile": "basic_context",
+      "total_runs": 1,
+      "valid_runs": 1,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "profile_mismatch_count": 0,
+      "avg_latency_seconds": 8.128,
+      "p95_latency_seconds": 8.128,
+      "avg_prompt_char_count": 674.0,
+      "avg_reference_caption_count": 0.0,
+      "avg_external_dependency_calls": 6.0,
+      "avg_model_call_count": 1.0
+    },
+    {
+      "scenario": "basic",
+      "variant": "selective",
+      "expected_profile": "basic_context",
+      "total_runs": 1,
+      "valid_runs": 1,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "profile_mismatch_count": 0,
+      "avg_latency_seconds": 13.408,
+      "p95_latency_seconds": 13.408,
+      "avg_prompt_char_count": 602.0,
+      "avg_reference_caption_count": 0.0,
+      "avg_external_dependency_calls": 6.0,
+      "avg_model_call_count": 1.0
+    },
+    {
+      "scenario": "menu",
+      "variant": "baseline",
+      "expected_profile": "menu_context",
+      "total_runs": 1,
+      "valid_runs": 1,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "profile_mismatch_count": 0,
+      "avg_latency_seconds": 6.151,
+      "p95_latency_seconds": 6.151,
+      "avg_prompt_char_count": 707.0,
+      "avg_reference_caption_count": 0.0,
+      "avg_external_dependency_calls": 6.0,
+      "avg_model_call_count": 1.0
+    },
+    {
+      "scenario": "menu",
+      "variant": "selective",
+      "expected_profile": "menu_context",
+      "total_runs": 1,
+      "valid_runs": 1,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "profile_mismatch_count": 0,
+      "avg_latency_seconds": 5.994,
+      "p95_latency_seconds": 5.994,
+      "avg_prompt_char_count": 708.0,
+      "avg_reference_caption_count": 0.0,
+      "avg_external_dependency_calls": 6.0,
+      "avg_model_call_count": 1.0
+    },
+    {
+      "scenario": "reference",
+      "variant": "baseline",
+      "expected_profile": "reference_context",
+      "total_runs": 1,
+      "valid_runs": 1,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "profile_mismatch_count": 0,
+      "avg_latency_seconds": 8.328,
+      "p95_latency_seconds": 8.328,
+      "avg_prompt_char_count": 830.0,
+      "avg_reference_caption_count": 2.0,
+      "avg_external_dependency_calls": 7.0,
+      "avg_model_call_count": 1.0
+    },
+    {
+      "scenario": "reference",
+      "variant": "selective",
+      "expected_profile": "reference_context",
+      "total_runs": 1,
+      "valid_runs": 1,
+      "fallback_count": 0,
+      "fallback_rate": 0.0,
+      "profile_mismatch_count": 0,
+      "avg_latency_seconds": 14.007,
+      "p95_latency_seconds": 14.007,
+      "avg_prompt_char_count": 765.0,
+      "avg_reference_caption_count": 2.0,
+      "avg_external_dependency_calls": 7.0,
+      "avg_model_call_count": 1.0
+    }
+  ],
+  "overall_summary": {
+    "baseline_avg_latency_seconds": 7.536,
+    "selective_avg_latency_seconds": 11.136,
+    "baseline_avg_prompt_char_count": 737.0,
+    "selective_avg_prompt_char_count": 691.7
+  },
+  "portfolio_recommendation": {
+    "use_time_metric_in_portfolio": false,
+    "reason": "Selective variant did not improve the overall average latency.",
+    "recommended_sentence": "동일 요청 기준 프롬프트 길이를 801자에서 727자로 약 9.2% 절감하고, 메뉴 설명만으로 충분한 경우 reference retrieval이 호출되지 않도록 개선했습니다."
+  }
+}

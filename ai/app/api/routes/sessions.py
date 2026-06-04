@@ -22,10 +22,17 @@ from app.services.keyword_extraction import (
     get_keyword_extraction_service,
 )
 from app.services.caption_generation import get_caption_generation_service
+from app.services.canonical_keyword_resolver import (
+    get_canonical_keyword_resolver_service,
+)
+from app.services.intent_classifier import build_intent_classifier_service
 from app.services.menu_promotion_context import (
     get_menu_promotion_context_service,
 )
-from app.services.sessions import process_utterance
+from app.services.reference_caption_retriever import (
+    get_reference_caption_retriever_service,
+)
+from app.services.sessions import process_utterance, resolve_context_routing_variant
 
 if TYPE_CHECKING:
     from app.services.final_edit import FinalEditUnavailableError
@@ -56,13 +63,26 @@ async def process_utterance_endpoint(
     request: Request,
     redis: Redis = Depends(get_redis),
 ) -> ProcessUtteranceResponse:
+    context_routing_variant = resolve_context_routing_variant(
+        request.headers.get("X-Context-Routing-Variant")
+    )
     keyword_service = get_keyword_extraction_service(request)
     caption_service = get_caption_generation_service(request)
     menu_promotion_context_service = get_menu_promotion_context_service(request)
+    intent_classifier_service = getattr(
+        request.app.state,
+        "intent_classifier_service",
+        build_intent_classifier_service(),
+    )
+    canonical_keyword_resolver_service = get_canonical_keyword_resolver_service(request)
+    reference_caption_retriever_service = get_reference_caption_retriever_service(
+        request
+    )
     logger.info(
         "process-utterance request received.",
         extra={
             "session_id": session_id,
+            "context_routing_variant": context_routing_variant,
             "payload_owner_persona": payload.owner_persona,
             "payload_weather_cloud_cover": payload.weather.cloud_cover,
             "payload_weather_temperature": payload.weather.temperature,
@@ -78,6 +98,10 @@ async def process_utterance_endpoint(
             keyword_service,
             caption_service,
             menu_promotion_context_service,
+            intent_classifier_service,
+            canonical_keyword_resolver_service,
+            reference_caption_retriever_service,
+            context_routing_variant=context_routing_variant,
         )
     except KeywordExtractionUnavailableError as exc:
         cause = exc.__cause__

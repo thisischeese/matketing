@@ -28,6 +28,8 @@ def env_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("S3_SECRET_KEY", "secret")
     monkeypatch.setenv("S3_BUCKET_NAME", "bucket")
     monkeypatch.setenv("S3_REGION", "ap-northeast-2")
+    monkeypatch.setenv("S3_ENDPOINT_URL", "http://minio:9000")
+    monkeypatch.setenv("S3_FORCE_PATH_STYLE", "true")
     monkeypatch.setenv("CLOUDFRONT_DOMAIN", "cdn.example.com")
     monkeypatch.setenv("KEYWORD_MODEL_BASE_URL", "http://keyword-server:8001")
     monkeypatch.setenv("KEYWORD_MODEL_NAME", "LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-AWQ")
@@ -110,6 +112,7 @@ def test_settings_parses_infra_fields(env_setup: None) -> None:
     )
     assert settings.CANONICAL_KEYWORD_EMBEDDING_DIM == 384
     assert settings.postgres_search_path == "public"
+    assert settings.PROCESS_UTTERANCE_CONTEXT_ROUTING_DEFAULT == "baseline"
 
 
 def test_postgres_dsn_format(env_setup: None) -> None:
@@ -218,7 +221,19 @@ def test_s3_configured_when_required_fields_exist(env_setup: None) -> None:
     settings = Settings(_env_file=None)
 
     assert settings.s3_configured is True
-    assert settings.CLOUDFRONT_DOMAIN == "cdn.example.com"
+    assert settings.S3_ENDPOINT_URL == "http://minio:9000"
+    assert settings.S3_FORCE_PATH_STYLE is True
+
+
+def test_context_routing_default_can_be_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_postgres(monkeypatch)
+    monkeypatch.setenv("PROCESS_UTTERANCE_CONTEXT_ROUTING_DEFAULT", "selective")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.PROCESS_UTTERANCE_CONTEXT_ROUTING_DEFAULT == "selective"
 
 
 def test_model_defaults_resolve_without_env(env_setup: None) -> None:
@@ -376,6 +391,8 @@ def test_s3_not_configured_when_bucket_missing(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("S3_ACCESS_KEY", "access")
     monkeypatch.setenv("S3_SECRET_KEY", "secret")
     monkeypatch.setenv("S3_REGION", "ap-northeast-2")
+    monkeypatch.setenv("S3_ENDPOINT_URL", "http://minio:9000")
+    monkeypatch.setenv("S3_FORCE_PATH_STYLE", "true")
     monkeypatch.delenv("S3_BUCKET_NAME", raising=False)
 
     settings = Settings(_env_file=None)

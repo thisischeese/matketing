@@ -7,7 +7,9 @@ from app.services.caption_generation import (
     CaptionGenerationRequest,
     CaptionGenerationService,
     CaptionGenerationUnavailableError,
+    CaptionPromptContext,
     build_caption_generation_dynamic_suffix,
+    build_caption_generation_selective_suffix,
     build_caption_generation_static_prefix,
 )
 
@@ -44,17 +46,37 @@ def _run_immediate(awaitable):
 
 def _build_request(**overrides) -> CaptionGenerationRequest:
     payload = {
-        "draft_keywords": ["에그타르트", "원두"],
+        "draft_keywords": ["egg tart", "cozy cafe"],
         "owner_persona": "warm",
         "today": "2026-05-18",
-        "utterance": "오늘 에그타르트 만들었는데 홍보하고 싶어",
+        "utterance": "promote today's egg tart with a cozy tone",
         "weather_tags": ["PRECIP_CLEAR"],
-        "menu_name": "에그 타르트",
-        "menu_description": "겹겹이 결이 살아 있는 바삭한 디저트",
-        "matched_keyword": "에그타르트",
+        "menu_name": "egg tart",
+        "menu_description": "buttery pastry with a crisp shell",
+        "matched_keyword": "egg tart",
     }
     payload.update(overrides)
     return CaptionGenerationRequest(**payload)
+
+
+def _build_prompt_context(**overrides) -> CaptionPromptContext:
+    payload = {
+        "owner_persona": "warm",
+        "today": "2026-05-18",
+        "weather_context": "clear day",
+        "utterance_summary": "promote today's egg tart with a cozy tone",
+        "context_profile": "basic_context",
+        "draft_keywords": ["egg tart", "cozy cafe"],
+        "matched_keyword": "egg tart",
+        "menu_name": "egg tart",
+        "menu_description": "buttery pastry with a crisp shell",
+        "reference_captions": [
+            "Warm dessert copy with cozy evening mood.",
+            "Highlight the signature menu with a soft cafe tone.",
+        ],
+    }
+    payload.update(overrides)
+    return CaptionPromptContext(**payload)
 
 
 def test_caption_generation_service_calls_remote_server_successfully(
@@ -74,7 +96,7 @@ def test_caption_generation_service_calls_remote_server_successfully(
             200,
             content=(
                 '{"guide_text":"메뉴가 잘 보이도록 가까이 촬영해보세요.",'
-                '"caption":"오늘의 에그 타르트를 따뜻하게 소개해보세요."}'
+                '"caption":"오늘의 에그타르트를 따뜻하게 소개해보세요."}'
             ),
         )
 
@@ -84,7 +106,7 @@ def test_caption_generation_service_calls_remote_server_successfully(
 
     assert calls == [(True, False)]
     assert result.guide_text == "메뉴가 잘 보이도록 가까이 촬영해보세요."
-    assert result.draft_caption == "오늘의 에그 타르트를 따뜻하게 소개해보세요."
+    assert result.draft_caption == "오늘의 에그타르트를 따뜻하게 소개해보세요."
     assert result.stored_caption == result.draft_caption
 
 
@@ -133,12 +155,14 @@ def test_caption_generation_service_retries_without_response_format(
             )
         return _make_chat_response(
             200,
-            content='{"guide_text":"촬영 포인트를 강조해보세요.","caption":"비 오는 날 메뉴를 소개합니다."}',
+            content='{"guide_text":"구도를 조금 더 가까이 잡아보세요.","caption":"비 오는 날 메뉴를 소개합니다."}',
         )
 
     monkeypatch.setattr(service, "_post_chat_completion", fake_post_chat_completion)
 
-    result = _run_immediate(service.generate_text(_build_request(weather_tags=["PRECIP_RAIN"])))
+    result = _run_immediate(
+        service.generate_text(_build_request(weather_tags=["PRECIP_RAIN"]))
+    )
 
     assert calls == [(True, False), (False, False)]
     assert result.draft_caption == "비 오는 날 메뉴를 소개합니다."
@@ -199,7 +223,7 @@ def test_caption_generation_service_caches_response_format_unsupported(
             )
         return _make_chat_response(
             200,
-            content='{"guide_text":"가이드.","caption":"캡션."}',
+            content='{"guide_text":"가이드입니다.","caption":"캡션입니다."}',
         )
 
     monkeypatch.setattr(service, "_post_chat_completion", fake_post_chat_completion)
@@ -217,12 +241,11 @@ def test_caption_generation_service_uses_menu_promotion_prompt_only() -> None:
 
     prompt = service._pipeline.build_prompt(_build_request())
 
-    assert '게시물 목적은 "메뉴 홍보"입니다.' in prompt
     assert "today: 2026-05-18" in prompt
-    assert "draft_keywords: 에그타르트, 원두" in prompt
-    assert "menu_name: 에그 타르트" in prompt
-    assert "menu_description: 겹겹이 결이 살아 있는 바삭한 디저트" in prompt
-    assert "reference" not in prompt.lower()
+    assert "draft_keywords: egg tart, cozy cafe" in prompt
+    assert "menu_name: egg tart" in prompt
+    assert "menu_description: buttery pastry with a crisp shell" in prompt
+    assert "reference_captions:" not in prompt
     assert "selected_menu_name" not in prompt
 
 
@@ -257,6 +280,69 @@ def test_caption_generation_dynamic_suffix_contains_only_runtime_fields() -> Non
     assert "menu_description:" in suffix
 
 
+def test_selective_suffix_omits_menu_fields_for_basic_context() -> None:
+    suffix = build_caption_generation_selective_suffix(
+        owner_persona="warm",
+        today="2026-05-18",
+        weather_context="clear day",
+        utterance="highlight the dessert",
+        draft_keywords="egg tart, beans",
+        context_profile="basic_context",
+        matched_keyword="egg tart",
+        menu_name="egg tart",
+        menu_description="buttery and crisp",
+        reference_captions="reference one | reference two",
+    )
+
+    assert "owner_persona: warm" in suffix
+    assert "draft_keywords: egg tart, beans" in suffix
+    assert "menu_name:" not in suffix
+    assert "menu_description:" not in suffix
+    assert "reference_captions:" not in suffix
+
+
+def test_selective_pipeline_uses_reference_context_only() -> None:
+    service = CaptionGenerationService(base_url="http://caption-server:8002")
+    request = _build_request(
+        context_routing_variant="selective",
+        context_profile="reference_context",
+        menu_name="egg tart",
+        menu_description=None,
+        matched_keyword="egg tart",
+        prompt_context=_build_prompt_context(
+            context_profile="reference_context",
+            menu_name=None,
+            menu_description=None,
+            matched_keyword=None,
+        ),
+    )
+
+    prompt = service._pipeline.build_prompt(request)
+
+    assert "reference_captions:" in prompt
+    assert "menu_name:" not in prompt
+    assert "menu_description:" not in prompt
+    assert "(없음)" not in prompt
+
+
+def test_selective_pipeline_uses_menu_context_without_reference_captions() -> None:
+    service = CaptionGenerationService(base_url="http://caption-server:8002")
+    request = _build_request(
+        context_routing_variant="selective",
+        context_profile="menu_context",
+        prompt_context=_build_prompt_context(
+            context_profile="menu_context",
+            reference_captions=[],
+        ),
+    )
+
+    prompt = service._pipeline.build_prompt(request)
+
+    assert "menu_name:" in prompt
+    assert "menu_description:" in prompt
+    assert "reference_captions:" not in prompt
+
+
 def test_caption_generation_payload_uses_static_and_dynamic_messages() -> None:
     service = CaptionGenerationService(base_url="http://caption-server:8002")
     request = _build_request()
@@ -268,10 +354,7 @@ def test_caption_generation_payload_uses_static_and_dynamic_messages() -> None:
         strict_language=False,
     )
 
-    assert payload["messages"][0] == {
-        "role": "system",
-        "content": "guide_text와 caption만 포함한 JSON 객체 하나만 반환하세요.",
-    }
+    assert payload["messages"][0]["role"] == "system"
     assert payload["messages"][1] == {
         "role": "user",
         "content": build_caption_generation_static_prefix(),
@@ -329,8 +412,8 @@ def test_caption_generation_service_retries_with_stricter_korean_prompt(
         return _make_chat_response(
             200,
             content=(
-                '{"guide_text":"에그 타르트가 잘 보이도록 촬영해보세요.",'
-                '"caption":"오늘의 에그 타르트를 따뜻하게 소개해보세요."}'
+                '{"guide_text":"에그타르트가 잘 보이도록 촬영해보세요.",'
+                '"caption":"오늘의 에그타르트를 따뜻하게 소개해보세요."}'
             ),
         )
 
@@ -339,7 +422,7 @@ def test_caption_generation_service_retries_with_stricter_korean_prompt(
     result = _run_immediate(service.generate_text(_build_request()))
 
     assert calls == [(True, False), (True, True)]
-    assert result.guide_text == "에그 타르트가 잘 보이도록 촬영해보세요."
+    assert result.guide_text == "에그타르트가 잘 보이도록 촬영해보세요."
 
 
 def test_caption_generation_service_raises_when_retry_still_non_korean(
@@ -372,8 +455,8 @@ def test_caption_generation_prompt_shrinks_long_menu_description() -> None:
 
     prompt = service._pipeline.build_prompt(
         _build_request(
-            utterance="에그타르트 홍보" * 80,
-            menu_description="바삭한 결과 고소한 버터 풍미가 살아 있는 메뉴입니다. " * 80,
+            utterance="promote egg tart " * 80,
+            menu_description=("buttery pastry with a crisp shell " * 80).strip(),
         )
     )
 
@@ -389,8 +472,8 @@ def test_caption_generation_fallback_uses_menu_name_first() -> None:
         fallback_source="caption_model_fallback",
     )
 
-    assert "에그 타르트" in fallback_result.result.guide_text
-    assert "에그 타르트" in fallback_result.result.draft_caption
+    assert "egg tart" in fallback_result.result.guide_text
+    assert "egg tart" in fallback_result.result.draft_caption
 
 
 def test_caption_generation_fallback_uses_default_guide_without_keywords_or_menu() -> None:

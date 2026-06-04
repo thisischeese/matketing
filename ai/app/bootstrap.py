@@ -33,6 +33,7 @@ from app.services.frame_extraction import (
     S3DraftUploader,
     S3VideoDownloader,
 )
+from app.services.intent_classifier import build_intent_classifier_service
 from app.services.keyword_extraction import (
     KeywordExtractionUnavailableError,
     build_keyword_extraction_service,
@@ -181,6 +182,7 @@ def _initialize_final_edit_service(app: FastAPI, temp_root: Path) -> None:
 
 def _initialize_text_services(app: FastAPI, temp_root: Path) -> None:
     _initialize_final_edit_service(app, temp_root)
+    app.state.intent_classifier_service = build_intent_classifier_service()
     app.state.keyword_extraction_service = build_keyword_extraction_service()
     app.state.caption_generation_service = build_caption_generation_service()
     app.state.canonical_keyword_resolver_service = (

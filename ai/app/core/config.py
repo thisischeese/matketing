@@ -91,6 +91,8 @@ class Settings(BaseSettings):
     S3_ACCESS_KEY: str | None = None
     S3_BUCKET_NAME: str | None = None
     S3_REGION: str | None = None
+    S3_ENDPOINT_URL: str | None = None
+    S3_FORCE_PATH_STYLE: bool = False
     CLOUDFRONT_DOMAIN: str | None = None
 
     NIMA_WEIGHTS_URL: str = DEFAULT_NIMA_WEIGHTS_URL
@@ -155,6 +157,10 @@ class Settings(BaseSettings):
     )
     REFERENCE_CAPTION_RAG_ENABLED: bool = True
     REFERENCE_CAPTION_MAX_REFERENCES: int = 2
+    PROCESS_UTTERANCE_CONTEXT_ROUTING_DEFAULT: Literal[
+        "baseline",
+        "selective",
+    ] = "baseline"
 
     @field_validator("DEBUG", mode="before")
     @classmethod

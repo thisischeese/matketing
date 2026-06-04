@@ -1,0 +1,58 @@
+name: marketing-gpu-llamacpp-text
+
+services:
+  keyword-server:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: keyword-server
+    ports:
+      - "${LLAMACPP_TEXT_PORT:-8000}:8000"
+    volumes:
+      - ${LLAMACPP_TEXT_MODEL_HOST_DIR}:/models/text:ro
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - -m
+      - /models/text/${LLAMACPP_TEXT_MODEL_FILE:-model.gguf}
+      - -c
+      - "${LLAMACPP_TEXT_CTX:-2048}"
+      - -b
+      - "${LLAMACPP_TEXT_BATCH:-256}"
+      - --n-gpu-layers
+      - "${LLAMACPP_TEXT_GPU_LAYERS:-35}"
+      - --parallel
+      - "1"
+      - --cont-batching
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  redis-data:

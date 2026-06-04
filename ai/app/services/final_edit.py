@@ -17,7 +17,9 @@ from app.core.config import settings
 from app.logging import build_log_extra, preview_text
 from app.schemas.sessions import FinalEditRequest
 from app.services.final_edit_planner import (
+    CarouselOrderPlan,
     FinalEditPlannerClient,
+    FinalEditPlanningError,
     FinalEditSessionContext,
     ImageEditPlan,
     build_noop_final_edit_plan,
@@ -83,6 +85,19 @@ def _determine_output_source(output_path: Path, draft_path: Path) -> str:
         if output_path == draft_path:
             return "original_fallback"
     return "edited"
+
+
+def _format_reorder_mapping(
+    *,
+    original_index: int,
+    reordered_slot_index: int,
+    uploaded_path: str,
+) -> str:
+    return (
+        f"original={original_index},"
+        f"slot={reordered_slot_index},"
+        f"uploaded={uploaded_path}"
+    )
 
 
 def _read_image_dimensions(image_path: Path) -> tuple[int | None, int | None]:
@@ -192,6 +207,7 @@ class S3DraftImageDownloader:
 
     def __init__(self) -> None:
         self._settings = settings
+        self._client = build_s3_client() if self._settings.s3_configured else None
 
     @property
     def is_configured(self) -> bool:
@@ -202,8 +218,8 @@ class S3DraftImageDownloader:
 
     def _download_draft(self, draft_key: str, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        client = build_s3_client()
-        client.download_file(
+        assert self._client is not None
+        self._client.download_file(
             self._settings.S3_BUCKET_NAME,
             normalize_s3_key(draft_key),
             str(destination),
@@ -215,6 +231,7 @@ class S3FinalImageUploader:
 
     def __init__(self) -> None:
         self._settings = settings
+        self._client = build_s3_client() if self._settings.s3_configured else None
 
     @property
     def is_configured(self) -> bool:
@@ -243,8 +260,8 @@ class S3FinalImageUploader:
         final_index: int,
     ) -> str:
         object_key = f"ai-finals/{session_id}/final-{final_index:03d}.png"
-        client = build_s3_client()
-        client.upload_file(
+        assert self._client is not None
+        self._client.upload_file(
             str(image_path),
             self._settings.S3_BUCKET_NAME,
             object_key,
@@ -253,8 +270,8 @@ class S3FinalImageUploader:
         return f"/{object_key}"
 
     def _delete_final(self, uploaded_path: str) -> None:
-        client = build_s3_client()
-        client.delete_object(
+        assert self._client is not None
+        self._client.delete_object(
             Bucket=self._settings.S3_BUCKET_NAME,
             Key=normalize_s3_key(uploaded_path),
         )
@@ -303,10 +320,12 @@ class FinalEditService:
             "debug:target_preset_fallback": str(preset_fallback).lower(),
             "debug:caption_present": str(bool(context.caption)).lower(),
             "debug:keyword_count": str(len(context.keywords)),
-            "debug:planner_mode": "json_batch",
+            "debug:planner_mode": "multi_image_single_call",
             "debug:planner_response_received": "false",
             "debug:planned_indexes": "",
             "debug:upscale_enabled": str(self.upscale_enabled).lower(),
+            "debug:reorder_attempted": "false",
+            "debug:reorder_applied": "false",
         }
 
     def _s3_failure_result(
@@ -348,10 +367,10 @@ class FinalEditService:
         session_dir: Path,
         debug_fields: dict[str, str],
     ) -> list[Path]:
-        downloaded_drafts: list[Path] = []
-        for final_index, draft_key in enumerate(drafts, start=1):
-            debug_fields["debug:stage"] = f"download_draft_{final_index}"
-            debug_fields[f"debug:draft_key:{final_index}"] = draft_key
+        async def _download_single_draft(
+            final_index: int,
+            draft_key: str,
+        ) -> tuple[int, str, Path, int]:
             suffix = _resolve_image_suffix(draft_key)
             draft_path = session_dir / f"draft-{final_index:03d}{suffix}"
             download_started_at = time.perf_counter()
@@ -368,7 +387,7 @@ class FinalEditService:
                 ),
             )
             await self.downloader.download_draft(draft_key, draft_path)
-            downloaded_drafts.append(draft_path)
+            elapsed_ms = int((time.perf_counter() - download_started_at) * 1000)
             logger.info(
                 "Downloaded draft image for final edit.",
                 extra=build_log_extra(
@@ -379,21 +398,41 @@ class FinalEditService:
                     final_index=final_index,
                     draft_key=draft_key,
                     outcome="succeeded",
-                    elapsed_ms=int((time.perf_counter() - download_started_at) * 1000),
+                    elapsed_ms=elapsed_ms,
                 ),
             )
+            return final_index, draft_key, draft_path, elapsed_ms
+
+        results = await asyncio.gather(
+            *[
+                _download_single_draft(final_index, draft_key)
+                for final_index, draft_key in enumerate(drafts, start=1)
+            ]
+        )
+        ordered_results = sorted(results, key=lambda item: item[0])
+        debug_fields["debug:downloaded_draft_count"] = str(len(ordered_results))
+        debug_fields["debug:download_task_count"] = str(len(ordered_results))
+        total_download_elapsed_ms = 0
+        downloaded_drafts: list[Path] = []
+        for final_index, draft_key, draft_path, elapsed_ms in ordered_results:
+            debug_fields["debug:stage"] = f"download_draft_{final_index}"
+            debug_fields[f"debug:draft_key:{final_index}"] = draft_key
+            debug_fields[f"debug:download_elapsed_ms:{final_index}"] = str(elapsed_ms)
+            total_download_elapsed_ms += elapsed_ms
+            downloaded_drafts.append(draft_path)
+        debug_fields["debug:total_download_elapsed_ms"] = str(total_download_elapsed_ms)
         return downloaded_drafts
 
-    async def _plan_images(
+    async def _plan_images_and_order(
         self,
         session_id: str,
         context: FinalEditSessionContext,
         downloaded_drafts: list[Path],
         debug_fields: dict[str, str],
-    ) -> tuple[bool, dict[int, object]]:
+    ) -> tuple[bool, dict[int, object], CarouselOrderPlan | None]:
         planner_fallback = not bool(context.caption or context.keywords)
         plans_by_index: dict[int, object] = {}
-        planner_response_received = False
+        precomputed_reorder_plan: CarouselOrderPlan | None = None
 
         logger.info(
             "Loading final edit session context.",
@@ -440,76 +479,82 @@ class FinalEditService:
                     keyword_count=len(context.keywords),
                 ),
             )
-            for image_index, draft_path in enumerate(downloaded_drafts):
-                try:
-                    plans = await self.planner_client.build_plans(
-                        [str(draft_path)],
-                        context,
-                    )
-                    planner_response_received = planner_response_received or bool(
-                        getattr(self.planner_client, "last_raw_output", None)
-                    )
-                    if not plans:
-                        continue
-                    remapped_plan = ImageEditPlan(
-                        image_index=image_index,
-                        content=plans[0].content,
-                        strategy=plans[0].strategy,
-                        tools=plans[0].tools,
-                        params=plans[0].params,
-                    )
-                    plans_by_index[image_index] = normalize_image_edit_plan(
-                        remapped_plan,
+            try:
+                batch_plan = await self.planner_client.build_batch_plan(
+                    [str(draft_path) for draft_path in downloaded_drafts],
+                    context,
+                )
+                debug_fields["debug:planner_response_received"] = str(
+                    bool(getattr(self.planner_client, "last_raw_output", None))
+                ).lower()
+                for plan in batch_plan.image_plans:
+                    plans_by_index[plan.image_index] = normalize_image_edit_plan(
+                        plan,
                         upscale_enabled=self.upscale_enabled,
                         owner_persona=context.owner_persona,
                     )
-                except Exception as exc:
-                    planner_fallback = True
-                    planner_failure_message = str(exc)
-                    planner_failure_raw_preview = _preview_or_empty(
-                        getattr(self.planner_client, "last_raw_output", "") or ""
+                precomputed_reorder_plan = batch_plan.carousel_order
+                if batch_plan.carousel_order_error_message:
+                    reorder_failure_raw_preview = _preview_or_empty(
+                        batch_plan.carousel_order_raw_output or ""
                     )
-                    debug_fields["debug:planner_failure_type"] = exc.__class__.__name__
-                    debug_fields["debug:planner_failure_message"] = (
-                        planner_failure_message
+                    debug_fields["debug:reorder_failure_type"] = (
+                        FinalEditPlanningError.__name__
                     )
-                    debug_fields["debug:planner_failure_image_index"] = str(
-                        image_index
+                    debug_fields["debug:reorder_failure_message"] = (
+                        batch_plan.carousel_order_error_message
                     )
-                    debug_fields["debug:planner_failure_raw_preview"] = (
-                        planner_failure_raw_preview
+                    debug_fields["debug:reorder_failure_raw_preview"] = (
+                        reorder_failure_raw_preview
                     )
-                    debug_fields[
-                        f"debug:planner_failure_type:{image_index + 1}"
-                    ] = exc.__class__.__name__
-                    debug_fields[
-                        f"debug:planner_failure_message:{image_index + 1}"
-                    ] = planner_failure_message
-                    debug_fields[
-                        f"debug:planner_failure_raw_preview:{image_index + 1}"
-                    ] = planner_failure_raw_preview
                     logger.warning(
-                        "Final edit planner failed for one image. Falling back for that image only.",
+                        "Final edit carousel reorder failed. Preserving original order.",
                         extra=build_log_extra(
-                            "final_edit.planner_fallback",
+                            "final_edit.reorder.completed",
                             component="final_edit",
-                            stage="plan",
+                            stage="reorder",
                             session_id=session_id,
                             outcome="fallback",
-                            error_type=exc.__class__.__name__,
-                            planner_fallback_reason="planner_exception",
-                            planner_failure_message=planner_failure_message,
-                            planner_failure_image_index=image_index,
-                            planner_failure_raw_preview=planner_failure_raw_preview,
-                            caption_present=bool(context.caption),
-                            keyword_count=len(context.keywords),
-                            downloaded_draft_count=len(downloaded_drafts),
+                            error_type=FinalEditPlanningError.__name__,
+                            reorder_failure_message=batch_plan.carousel_order_error_message,
+                            reorder_failure_raw_preview=reorder_failure_raw_preview,
                         ),
                     )
+            except Exception as exc:
+                planner_fallback = True
+                planner_failure_message = str(exc)
+                planner_failure_raw_preview = _preview_or_empty(
+                    getattr(self.planner_client, "last_raw_output", "") or ""
+                )
+                debug_fields["debug:planner_failure_type"] = exc.__class__.__name__
+                debug_fields["debug:planner_failure_message"] = (
+                    planner_failure_message
+                )
+                debug_fields["debug:planner_failure_raw_preview"] = (
+                    planner_failure_raw_preview
+                )
+                logger.warning(
+                    "Final edit planner failed. Falling back for all images.",
+                    extra=build_log_extra(
+                        "final_edit.planner_fallback",
+                        component="final_edit",
+                        stage="plan",
+                        session_id=session_id,
+                        outcome="fallback",
+                        error_type=exc.__class__.__name__,
+                        planner_fallback_reason="planner_exception",
+                        planner_failure_message=planner_failure_message,
+                        planner_failure_raw_preview=planner_failure_raw_preview,
+                        caption_present=bool(context.caption),
+                        keyword_count=len(context.keywords),
+                        downloaded_draft_count=len(downloaded_drafts),
+                    ),
+                )
+                debug_fields["debug:planner_response_received"] = "false"
 
-            debug_fields["debug:planner_response_received"] = str(
-                planner_response_received
-            ).lower()
+            request_stats = getattr(self.planner_client, "last_request_stats", {}) or {}
+            for key, value in request_stats.items():
+                debug_fields[f"debug:{key}"] = str(value)
             debug_fields["debug:planned_indexes"] = ",".join(
                 str(image_index) for image_index in sorted(plans_by_index)
             )
@@ -536,6 +581,15 @@ class FinalEditService:
                     planner_response_preview=_preview_or_empty(
                         getattr(self.planner_client, "last_raw_output", "") or ""
                     ),
+                    prompt_text_chars_total=request_stats.get("prompt_text_chars_total"),
+                    prompt_image_count=request_stats.get("prompt_image_count"),
+                    prompt_image_data_uri_chars_total=request_stats.get(
+                        "prompt_image_data_uri_chars_total"
+                    ),
+                    prompt_payload_json_chars=request_stats.get(
+                        "prompt_payload_json_chars"
+                    ),
+                    reorder_precomputed=precomputed_reorder_plan is not None,
                     planner_partial_fallback=planner_fallback,
                     elapsed_ms=int((time.perf_counter() - plan_started_at) * 1000),
                 ),
@@ -543,7 +597,7 @@ class FinalEditService:
 
         debug_fields["debug:planner_fallback"] = str(planner_fallback).lower()
         debug_fields["debug:planned_image_count"] = str(len(plans_by_index))
-        return planner_fallback, plans_by_index
+        return planner_fallback, plans_by_index, precomputed_reorder_plan
 
     async def _process_images(
         self,
@@ -670,22 +724,153 @@ class FinalEditService:
             edited_paths.append(output_path)
         return edited_paths
 
+    async def _reorder_edited_images(
+        self,
+        session_id: str,
+        drafts: list[str],
+        downloaded_drafts: list[Path],
+        edited_paths: list[Path],
+        precomputed_reorder_plan: CarouselOrderPlan | None,
+        debug_fields: dict[str, str],
+    ) -> tuple[list[str], list[Path], list[Path], list[int]]:
+        original_indexes = list(range(len(edited_paths)))
+        if len(edited_paths) != 3:
+            return drafts, downloaded_drafts, edited_paths, original_indexes
+
+        debug_fields["debug:reorder_attempted"] = "true"
+        logger.info(
+            "Attempting final edit carousel reorder.",
+            extra=build_log_extra(
+                "final_edit.reorder.started",
+                component="final_edit",
+                stage="reorder",
+                session_id=session_id,
+                outcome="started",
+                image_count=len(edited_paths),
+            ),
+        )
+        if precomputed_reorder_plan is None:
+            debug_fields["debug:reorder_applied"] = "false"
+            return drafts, downloaded_drafts, edited_paths, original_indexes
+
+        return self._apply_reorder_plan(
+            session_id=session_id,
+            drafts=drafts,
+            downloaded_drafts=downloaded_drafts,
+            edited_paths=edited_paths,
+            reorder_plan=precomputed_reorder_plan,
+            debug_fields=debug_fields,
+        )
+
+    def _apply_reorder_plan(
+        self,
+        *,
+        session_id: str,
+        drafts: list[str],
+        downloaded_drafts: list[Path],
+        edited_paths: list[Path],
+        reorder_plan: CarouselOrderPlan,
+        debug_fields: dict[str, str],
+    ) -> tuple[list[str], list[Path], list[Path], list[int]]:
+        debug_fields["debug:reorder_order"] = ",".join(
+            str(index) for index in reorder_plan.ordered_image_indexes
+        )
+        debug_fields["debug:reorder_hook_scores"] = ",".join(
+            f"{score:.2f}" for score in reorder_plan.hook_scores
+        )
+        debug_fields["debug:reorder_confidence"] = (
+            f"{reorder_plan.overall_confidence:.2f}"
+        )
+        debug_fields["debug:reorder_reason"] = reorder_plan.reason
+
+        is_valid_order = sorted(reorder_plan.ordered_image_indexes) == [0, 1, 2]
+        is_valid_hook_scores = (
+            len(reorder_plan.hook_scores) == 3
+            and all(
+                reorder_plan.hook_scores[index] >= reorder_plan.hook_scores[index + 1]
+                for index in range(2)
+            )
+        )
+        should_apply = (
+            is_valid_order
+            and is_valid_hook_scores
+            and reorder_plan.overall_confidence >= 0.70
+        )
+        if not should_apply:
+            debug_fields["debug:reorder_applied"] = "false"
+            if not is_valid_order:
+                skip_reason = "invalid_order"
+            elif not is_valid_hook_scores:
+                skip_reason = "invalid_hook_scores"
+            else:
+                skip_reason = "low_confidence"
+            debug_fields["debug:reorder_skip_reason"] = skip_reason
+            logger.info(
+                "Final edit carousel reorder skipped due to low confidence or invalid output.",
+                extra=build_log_extra(
+                    "final_edit.reorder.completed",
+                    component="final_edit",
+                    stage="reorder",
+                    session_id=session_id,
+                    outcome="skipped",
+                    reorder_skip_reason=skip_reason,
+                    reorder_confidence=reorder_plan.overall_confidence,
+                    reorder_order=reorder_plan.ordered_image_indexes,
+                    reorder_hook_scores=reorder_plan.hook_scores,
+                    reorder_reason_preview=_preview_or_empty(reorder_plan.reason),
+                ),
+            )
+            return drafts, downloaded_drafts, edited_paths, list(range(len(edited_paths)))
+
+        reordered_drafts = [drafts[index] for index in reorder_plan.ordered_image_indexes]
+        reordered_downloaded_drafts = [
+            downloaded_drafts[index] for index in reorder_plan.ordered_image_indexes
+        ]
+        reordered_edited_paths = [
+            edited_paths[index] for index in reorder_plan.ordered_image_indexes
+        ]
+        debug_fields["debug:reorder_applied"] = "true"
+        logger.info(
+            "Applied final edit carousel reorder.",
+            extra=build_log_extra(
+                "final_edit.reorder.completed",
+                component="final_edit",
+                stage="reorder",
+                session_id=session_id,
+                outcome="succeeded",
+                reorder_confidence=reorder_plan.overall_confidence,
+                reorder_order=reorder_plan.ordered_image_indexes,
+                reorder_hook_scores=reorder_plan.hook_scores,
+                reorder_reason_preview=_preview_or_empty(reorder_plan.reason),
+            ),
+        )
+        return (
+            reordered_drafts,
+            reordered_downloaded_drafts,
+            reordered_edited_paths,
+            list(reorder_plan.ordered_image_indexes),
+        )
+
     async def _upload_edited_images(
         self,
         session_id: str,
         drafts: list[str],
         downloaded_drafts: list[Path],
         edited_paths: list[Path],
+        original_indexes: list[int],
         debug_fields: dict[str, str],
         uploaded_results: list[str],
     ) -> None:
-        for final_index, draft_key in enumerate(drafts, start=1):
-            output_path = edited_paths[final_index - 1]
-            draft_path = downloaded_drafts[final_index - 1]
+        async def _upload_single_final(
+            final_index: int,
+            original_index: int,
+            draft_key: str,
+            output_path: Path,
+            draft_path: Path,
+        ) -> tuple[int, int, str, str, Path, bool, int | None, int | None, int, str]:
             upload_source_kind = _determine_output_source(output_path, draft_path)
             upload_source_exists = output_path.exists()
             upload_width, upload_height = _read_image_dimensions(output_path)
-            debug_fields["debug:stage"] = f"upload_final_{final_index}"
             upload_started_at = time.perf_counter()
             logger.info(
                 "Uploading final edited image.",
@@ -695,6 +880,8 @@ class FinalEditService:
                     stage="upload_final",
                     session_id=session_id,
                     final_index=final_index,
+                    original_image_index=original_index + 1,
+                    reordered_slot_index=final_index,
                     draft_key=draft_key,
                     outcome="started",
                     upload_source_path=str(output_path),
@@ -709,7 +896,7 @@ class FinalEditService:
                 output_path,
                 final_index,
             )
-            uploaded_results.append(uploaded_path)
+            elapsed_ms = int((time.perf_counter() - upload_started_at) * 1000)
             logger.info(
                 "Uploaded final edited image.",
                 extra=build_log_extra(
@@ -718,6 +905,8 @@ class FinalEditService:
                     stage="upload_final",
                     session_id=session_id,
                     final_index=final_index,
+                    original_image_index=original_index + 1,
+                    reordered_slot_index=final_index,
                     draft_key=draft_key,
                     outcome="succeeded",
                     uploaded_path=uploaded_path,
@@ -726,9 +915,72 @@ class FinalEditService:
                     upload_source_exists=upload_source_exists,
                     upload_image_width=upload_width,
                     upload_image_height=upload_height,
-                    elapsed_ms=int((time.perf_counter() - upload_started_at) * 1000),
+                    elapsed_ms=elapsed_ms,
                 ),
             )
+            return (
+                final_index,
+                original_index,
+                draft_key,
+                uploaded_path,
+                output_path,
+                upload_source_exists,
+                upload_width,
+                upload_height,
+                elapsed_ms,
+                upload_source_kind,
+            )
+
+        tasks = [
+            _upload_single_final(
+                final_index,
+                original_indexes[final_index - 1],
+                draft_key,
+                edited_paths[final_index - 1],
+                downloaded_drafts[final_index - 1],
+            )
+            for final_index, draft_key in enumerate(drafts, start=1)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        successful_results: list[
+            tuple[int, str, str, Path, bool, int | None, int | None, int, str]
+        ] = []
+        first_exception: Exception | None = None
+        for result in results:
+            if isinstance(result, Exception):
+                if first_exception is None:
+                    first_exception = result
+                continue
+            successful_results.append(result)
+
+        ordered_results = sorted(successful_results, key=lambda item: item[0])
+        debug_fields["debug:uploaded_final_count"] = str(len(ordered_results))
+        debug_fields["debug:upload_task_count"] = str(len(drafts))
+        total_upload_elapsed_ms = 0
+        for (
+            final_index,
+            original_index,
+            _draft_key,
+            uploaded_path,
+            _output_path,
+            _upload_source_exists,
+            _upload_width,
+            _upload_height,
+            elapsed_ms,
+            _upload_source_kind,
+        ) in ordered_results:
+            debug_fields["debug:stage"] = f"upload_final_{final_index}"
+            debug_fields[f"debug:upload_elapsed_ms:{final_index}"] = str(elapsed_ms)
+            debug_fields[f"debug:reorder_mapping:{final_index}"] = _format_reorder_mapping(
+                original_index=original_index + 1,
+                reordered_slot_index=final_index,
+                uploaded_path=uploaded_path,
+            )
+            total_upload_elapsed_ms += elapsed_ms
+            uploaded_results.append(uploaded_path)
+        debug_fields["debug:total_upload_elapsed_ms"] = str(total_upload_elapsed_ms)
+        if first_exception is not None:
+            raise first_exception
 
     async def edit_and_upload(
         self,
@@ -752,7 +1004,7 @@ class FinalEditService:
                 session_dir,
                 debug_fields,
             )
-            planner_fallback, plans_by_index = await self._plan_images(
+            planner_fallback, plans_by_index, precomputed_reorder_plan = await self._plan_images_and_order(
                 session_id,
                 context,
                 downloaded_drafts,
@@ -768,16 +1020,44 @@ class FinalEditService:
                 context,
                 debug_fields,
             )
+            drafts, downloaded_drafts, edited_paths, original_indexes = await self._reorder_edited_images(
+                session_id,
+                drafts,
+                downloaded_drafts,
+                edited_paths,
+                precomputed_reorder_plan,
+                debug_fields,
+            )
             await self._upload_edited_images(
                 session_id,
                 drafts,
                 downloaded_drafts,
                 edited_paths,
+                original_indexes,
                 debug_fields,
                 uploaded_results,
             )
 
             debug_fields["debug:stage"] = "completed"
+            logger.info(
+                "Completed final edit workflow.",
+                extra=build_log_extra(
+                    "final_edit.completed",
+                    component="final_edit",
+                    stage="completed",
+                    session_id=session_id,
+                    outcome="succeeded",
+                    downloaded_draft_count=len(downloaded_drafts),
+                    uploaded_final_count=len(uploaded_results),
+                    reorder_applied=debug_fields.get("debug:reorder_applied"),
+                    total_download_elapsed_ms=debug_fields.get(
+                        "debug:total_download_elapsed_ms"
+                    ),
+                    total_upload_elapsed_ms=debug_fields.get(
+                        "debug:total_upload_elapsed_ms"
+                    ),
+                ),
+            )
             return FinalEditResult(
                 status=STATUS_PHOTO_EDITED,
                 results=uploaded_results,

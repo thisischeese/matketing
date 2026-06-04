@@ -5,10 +5,13 @@ from app.services import final_edit_filter_catalog as filter_catalog_module
 from app.services.final_edit_filter_catalog import FinalEditFilterCatalogError
 from app.services.final_edit_planner import (
     TARGET_PROFILE_KIND_TONE,
+    CarouselOrderPlan,
     FinalEditPlannerClient,
     FinalEditPlanningError,
     FinalEditSessionContext,
     ImageEditPlan,
+    build_carousel_order_dynamic_suffix,
+    build_carousel_order_system_prompt,
     build_default_final_edit_plan,
     build_final_edit_dynamic_suffix,
     build_final_edit_messages,
@@ -18,6 +21,8 @@ from app.services.final_edit_planner import (
     load_final_edit_filter_catalog,
     load_final_edit_session_context,
     normalize_image_edit_plan,
+    parse_carousel_order_plan,
+    parse_final_edit_batch_plan,
     parse_image_edit_plans,
     resolve_owner_persona_preset,
     resolve_owner_persona_target,
@@ -140,13 +145,18 @@ def test_build_final_edit_prompt_includes_filter_catalog_and_rules() -> None:
     assert "[owner_persona] friendly" in prompt
     assert "[caption] cozy cake intro" in prompt
     assert '[filter catalog]' in prompt
-    assert 'tools must be exactly ["filter"]' in prompt
-    assert '"filter_name": "<catalog filter name>"' in prompt
-    assert "Do not output any numeric editing parameters" in prompt
+    assert 'Allowed tool sequences: ["filter"], ["denoise","filter"], ["sharpen","filter"], ["denoise","sharpen","filter"], ["crop","filter"], ["crop","denoise","filter"], ["crop","sharpen","filter"], ["crop","denoise","sharpen","filter"].' in prompt
+    assert 'Use exactly two top-level keys: "image_plans" and "carousel_order".' in prompt
+    assert 'Allowed tools: crop, denoise, sharpen, filter.' in prompt
+    assert '"filter_name":"<catalog filter name>"' in prompt
+    assert '"subject_boxes":[[x1,y1,x2,y2],...]' in prompt
+    assert 'sharpen params: {"strength":0.0~1.0}' in prompt
+    assert "Do not output any other numeric edit params." in prompt
     assert "Valencia" in prompt
     assert "pilgram2_name" not in prompt
-    assert "all 1 input images" in prompt
-    assert "image_index from 0 to 0" in prompt
+    assert "Plan all 3 input images." in prompt
+    assert "image_plans must include image_index 0 to 2 exactly once." in prompt
+    assert '"ordered_image_indexes":[0,1,2]' in prompt
     assert "color_grading" not in prompt
 
 
@@ -161,19 +171,15 @@ def test_build_final_edit_prompt_keeps_aesthetic_target_profile_context() -> Non
     )
 
     assert "[target_profile_kind] tone_profile" in prompt
-    assert '"brightness"' in prompt
-    assert '"tolerance"' in prompt
-    assert (
-        f"\"target\": {AESTHETIC_TARGET_TONE_PROFILE['brightness']['target']}"
-        in prompt
-    )
+    assert "[style_hint]" in prompt
+    assert f"brightness={AESTHETIC_TARGET_TONE_PROFILE['brightness']['target']}" in prompt
 
 
 def test_build_final_edit_static_prefix_is_stable() -> None:
-    assert build_final_edit_static_prefix() == build_final_edit_static_prefix()
-    assert "[filter catalog]" in build_final_edit_static_prefix()
-    assert "all 1 input images" in build_final_edit_static_prefix()
-    assert "image_index from 0 to 0" in build_final_edit_static_prefix()
+    assert build_final_edit_static_prefix(3) == build_final_edit_static_prefix(3)
+    assert "[filter catalog]" in build_final_edit_static_prefix(3)
+    assert "Plan all 3 input images." in build_final_edit_static_prefix(3)
+    assert "image_plans must include image_index 0 to 2 exactly once." in build_final_edit_static_prefix(3)
 
 
 def test_build_final_edit_dynamic_suffix_contains_only_runtime_context() -> None:
@@ -193,11 +199,14 @@ def test_build_final_edit_dynamic_suffix_contains_only_runtime_context() -> None
 
 
 def test_build_final_edit_system_prompt_keeps_strict_rules() -> None:
-    system_prompt = build_final_edit_system_prompt()
+    system_prompt = build_final_edit_system_prompt(image_count=3)
 
-    assert "Return only a JSON array." in system_prompt
-    assert 'tools must be exactly ["filter"]' in system_prompt
-    assert "Do not output any numeric editing parameters" in system_prompt
+    assert "Return only a JSON object." in system_prompt
+    assert '"image_plans" must contain exactly 3 plans.' in system_prompt
+    assert 'Allowed tool sequences: ["filter"], ["denoise","filter"], ["sharpen","filter"], ["denoise","sharpen","filter"], ["crop","filter"], ["crop","denoise","filter"], ["crop","sharpen","filter"], ["crop","denoise","sharpen","filter"].' in system_prompt
+    assert '"subject_boxes":[[x1,y1,x2,y2],...]' in system_prompt
+    assert 'sharpen params: {"strength":0.0~1.0}' in system_prompt
+    assert "Do not output any other numeric edit params." in system_prompt
 
 
 def test_build_final_edit_messages_places_fixed_text_before_images() -> None:
@@ -222,10 +231,35 @@ def test_build_final_edit_messages_places_fixed_text_before_images() -> None:
     user_content = messages[1]["content"]
     assert user_content[0]["type"] == "text"
     assert "[filter catalog]" in user_content[0]["text"]
+    assert "Plan all 1 input images." in user_content[0]["text"]
     assert user_content[1]["type"] == "text"
     assert "[caption] cake" in user_content[1]["text"]
     assert user_content[2]["type"] == "image_url"
     assert user_content[2]["image_url"]["url"] == "data:image/mock;base64,a.jpg"
+
+
+def test_build_carousel_order_system_prompt_keeps_slot_roles_fixed() -> None:
+    system_prompt = build_carousel_order_system_prompt()
+
+    assert '"hook_scores" must be a list of three numbers from 0.0 to 1.0 aligned with "ordered_image_indexes".' in system_prompt
+    assert '"hook_scores" must be sorted in non-increasing order' in system_prompt
+    assert "Rank the three images by hooking power only." in system_prompt
+
+
+def test_build_carousel_order_dynamic_suffix_includes_non_identity_example() -> None:
+    suffix = build_carousel_order_dynamic_suffix(
+        FinalEditSessionContext(
+            owner_persona="friendly",
+            caption="cozy cake intro",
+            keywords=["dessert", "latte"],
+        )
+    )
+
+    assert "Important: hook_scores must align with ordered_image_indexes in output order." in suffix
+    assert "Important: hook_scores must be sorted from highest to lowest." in suffix
+    assert '"ordered_image_indexes": [0, 2, 1]' in suffix
+    assert '"hook_scores": [0.93, 0.74, 0.58]' in suffix
+    assert "logger = logging.getLogger(__name__)" not in suffix
 
 
 def test_resolve_owner_persona_preset_falls_back_to_aesthetic() -> None:
@@ -322,7 +356,7 @@ def test_build_final_edit_prompt_is_stable_when_upscale_disabled(
         1,
     )
 
-    assert 'tools must be exactly ["filter"]' in prompt
+    assert 'Allowed tool sequences: ["filter"], ["denoise","filter"], ["sharpen","filter"], ["denoise","sharpen","filter"], ["crop","filter"], ["crop","denoise","filter"], ["crop","sharpen","filter"], ["crop","denoise","sharpen","filter"].' in prompt
     assert "Upscale must be included for every image" not in prompt
 
 
@@ -405,7 +439,7 @@ def test_parse_image_edit_plans_requires_filter_name() -> None:
 
 
 def test_parse_image_edit_plans_rejects_color_grading_tool() -> None:
-    with pytest.raises(FinalEditPlanningError, match='tools must be exactly \\["filter"\\]'):
+    with pytest.raises(FinalEditPlanningError, match="Unsupported tool requested"):
         parse_image_edit_plans(
             """
             [
@@ -421,35 +455,593 @@ def test_parse_image_edit_plans_rejects_color_grading_tool() -> None:
         )
 
 
+def test_parse_image_edit_plans_accepts_crop_and_filter_and_appends_upscale() -> None:
+    plans = parse_image_edit_plans(
+        """
+        [
+          {
+            "image_index": 0,
+            "content": "cake and latte on a wooden table",
+            "strategy": "Crop in on the dessert and apply a warm nostalgic filter.",
+            "tools": ["crop", "filter"],
+            "params": {
+              "crop": {
+                "subject_boxes": [[120, 80, 420, 520]],
+                "keep_edges": ["top"]
+              },
+              "filter": {"filter_name": "valencia"}
+            }
+          }
+        ]
+        """,
+        upscale_enabled=True,
+        owner_persona="friendly",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].tools == ["crop", "filter", "upscale"]
+    assert plans[0].params["crop"] == {
+        "subject_boxes": [[120, 80, 420, 520]],
+        "keep_edges": ["top"],
+    }
+    assert plans[0].params["filter"]["filter_name"] == "Valencia"
+
+
+def test_parse_image_edit_plans_accepts_denoise_and_filter_and_appends_upscale() -> None:
+    plans = parse_image_edit_plans(
+        """
+        [
+          {
+            "image_index": 0,
+            "content": "night cafe cake",
+            "strategy": "The low-light scene looks noisy, so denoise lightly before applying Reyes.",
+            "tools": ["denoise", "filter"],
+            "params": {
+              "denoise": {"strength": 0.4},
+              "filter": {"filter_name": "reyes"}
+            }
+          }
+        ]
+        """,
+        upscale_enabled=True,
+        owner_persona="friendly",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].tools == ["denoise", "filter", "upscale"]
+    assert plans[0].params["denoise"] == {"strength": 0.4}
+    assert plans[0].params["filter"]["filter_name"] == "Reyes"
+
+
+def test_parse_image_edit_plans_accepts_sharpen_and_filter_and_appends_upscale() -> None:
+    plans = parse_image_edit_plans(
+        """
+        [
+          {
+            "image_index": 0,
+            "content": "cake close-up",
+            "strategy": "The main subject looks a little soft, so sharpen it lightly before applying Reyes.",
+            "tools": ["sharpen", "filter"],
+            "params": {
+              "sharpen": {"strength": 0.25},
+              "filter": {"filter_name": "reyes"}
+            }
+          }
+        ]
+        """,
+        upscale_enabled=True,
+        owner_persona="friendly",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].tools == ["sharpen", "filter", "upscale"]
+    assert plans[0].params["sharpen"] == {"strength": 0.25}
+    assert plans[0].params["filter"]["filter_name"] == "Reyes"
+
+
+def test_parse_image_edit_plans_accepts_crop_denoise_sharpen_and_filter_and_appends_upscale() -> None:
+    plans = parse_image_edit_plans(
+        """
+        [
+          {
+            "image_index": 0,
+            "content": "night cafe cake",
+            "strategy": "Crop in on the dessert, reduce visible noise, sharpen lightly, then apply a warm filter.",
+            "tools": ["crop", "denoise", "sharpen", "filter"],
+            "params": {
+              "crop": {
+                "subject_boxes": [[120, 80, 420, 520]],
+                "keep_edges": ["top"]
+              },
+              "denoise": {"strength": 0.35},
+              "sharpen": {"strength": 0.2},
+              "filter": {"filter_name": "valencia"}
+            }
+          }
+        ]
+        """,
+        upscale_enabled=True,
+        owner_persona="friendly",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].tools == ["crop", "denoise", "sharpen", "filter", "upscale"]
+    assert plans[0].params["crop"] == {
+        "subject_boxes": [[120, 80, 420, 520]],
+        "keep_edges": ["top"],
+    }
+    assert plans[0].params["denoise"] == {"strength": 0.35}
+    assert plans[0].params["sharpen"] == {"strength": 0.2}
+    assert plans[0].params["filter"]["filter_name"] == "Valencia"
+
+
+def test_parse_image_edit_plans_accepts_crop_denoise_and_filter_and_appends_upscale() -> None:
+    plans = parse_image_edit_plans(
+        """
+        [
+          {
+            "image_index": 0,
+            "content": "night cafe cake",
+            "strategy": "Crop in on the dessert, reduce the visible noise, then apply a warm filter.",
+            "tools": ["crop", "denoise", "filter"],
+            "params": {
+              "crop": {
+                "subject_boxes": [[120, 80, 420, 520]],
+                "keep_edges": ["top"]
+              },
+              "denoise": {"strength": 0.35},
+              "filter": {"filter_name": "valencia"}
+            }
+          }
+        ]
+        """,
+        upscale_enabled=True,
+        owner_persona="friendly",
+    )
+
+    assert len(plans) == 1
+    assert plans[0].tools == ["crop", "denoise", "filter", "upscale"]
+    assert plans[0].params["crop"] == {
+        "subject_boxes": [[120, 80, 420, 520]],
+        "keep_edges": ["top"],
+    }
+    assert plans[0].params["denoise"] == {"strength": 0.35}
+    assert plans[0].params["filter"]["filter_name"] == "Valencia"
+
+
+def test_parse_image_edit_plans_requires_crop_subject_boxes() -> None:
+    with pytest.raises(FinalEditPlanningError, match="subject_boxes"):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "crop it",
+                "tools": ["crop", "filter"],
+                "params": {
+                  "crop": {},
+                  "filter": {"filter_name": "Reyes"}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_rejects_empty_crop_subject_boxes() -> None:
+    with pytest.raises(FinalEditPlanningError, match="subject_boxes"):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "crop it",
+                "tools": ["crop", "filter"],
+                "params": {
+                  "crop": {"subject_boxes": []},
+                  "filter": {"filter_name": "Reyes"}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_rejects_invalid_crop_box_shape() -> None:
+    with pytest.raises(FinalEditPlanningError, match="list of four coordinates"):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "crop it",
+                "tools": ["crop", "filter"],
+                "params": {
+                  "crop": {"subject_boxes": [[1, 2, 3]]},
+                  "filter": {"filter_name": "Reyes"}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_rejects_invalid_crop_keep_edges() -> None:
+    with pytest.raises(FinalEditPlanningError, match="keep_edges"):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "crop it",
+                "tools": ["crop", "filter"],
+                "params": {
+                  "crop": {
+                    "subject_boxes": [[10, 10, 60, 100]],
+                    "keep_edges": ["diagonal"]
+                  },
+                  "filter": {"filter_name": "Reyes"}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_requires_filter_when_crop_is_used() -> None:
+    with pytest.raises(FinalEditPlanningError, match="filter must be included"):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "crop it",
+                "tools": ["crop"],
+                "params": {
+                  "crop": {"subject_boxes": [[10, 10, 60, 100]]}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_requires_denoise_strength() -> None:
+    with pytest.raises(FinalEditPlanningError, match="denoise params must include strength"):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "denoise it",
+                "tools": ["denoise", "filter"],
+                "params": {
+                  "denoise": {},
+                  "filter": {"filter_name": "Reyes"}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_rejects_non_numeric_denoise_strength() -> None:
+    with pytest.raises(FinalEditPlanningError, match="denoise strength must be numeric"):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "denoise it",
+                "tools": ["denoise", "filter"],
+                "params": {
+                  "denoise": {"strength": "high"},
+                  "filter": {"filter_name": "Reyes"}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_requires_sharpen_strength() -> None:
+    with pytest.raises(FinalEditPlanningError, match="sharpen params must include strength"):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "sharpen it",
+                "tools": ["sharpen", "filter"],
+                "params": {
+                  "sharpen": {},
+                  "filter": {"filter_name": "Reyes"}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_rejects_non_numeric_sharpen_strength() -> None:
+    with pytest.raises(FinalEditPlanningError, match="sharpen strength must be numeric"):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "sharpen it",
+                "tools": ["sharpen", "filter"],
+                "params": {
+                  "sharpen": {"strength": "high"},
+                  "filter": {"filter_name": "Reyes"}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_rejects_crop_after_filter() -> None:
+    with pytest.raises(FinalEditPlanningError, match='tools must be one of'):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "filter then crop",
+                "tools": ["filter", "crop"],
+                "params": {
+                  "crop": {"subject_boxes": [[10, 10, 60, 100]]},
+                  "filter": {"filter_name": "Reyes"}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_rejects_denoise_after_filter() -> None:
+    with pytest.raises(FinalEditPlanningError, match='tools must be one of'):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "filter then denoise",
+                "tools": ["filter", "denoise"],
+                "params": {
+                  "denoise": {"strength": 0.4},
+                  "filter": {"filter_name": "Reyes"}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_image_edit_plans_rejects_sharpen_after_filter() -> None:
+    with pytest.raises(FinalEditPlanningError, match='tools must be one of'):
+        parse_image_edit_plans(
+            """
+            [
+              {
+                "image_index": 0,
+                "content": "cake",
+                "strategy": "filter then sharpen",
+                "tools": ["filter", "sharpen"],
+                "params": {
+                  "sharpen": {"strength": 0.2},
+                  "filter": {"filter_name": "Reyes"}
+                }
+              }
+            ]
+            """
+        )
+
+
+def test_parse_carousel_order_plan_accepts_valid_payload() -> None:
+    plan = parse_carousel_order_plan(
+        """
+          {
+            "ordered_image_indexes": [2, 0, 1],
+            "hook_scores": [0.91, 0.73, 0.52],
+            "overall_confidence": 0.82,
+            "reason": "The third image hooks best, the first is the second strongest hook, and the second is the weakest hook."
+          }
+        """
+    )
+
+    assert plan == CarouselOrderPlan(
+        ordered_image_indexes=[2, 0, 1],
+        hook_scores=[0.91, 0.73, 0.52],
+        overall_confidence=0.82,
+        reason="The third image hooks best, the first is the second strongest hook, and the second is the weakest hook.",
+    )
+
+
+def test_parse_carousel_order_plan_rejects_duplicate_indexes() -> None:
+    with pytest.raises(FinalEditPlanningError, match="permutation"):
+        parse_carousel_order_plan(
+            """
+              {
+                "ordered_image_indexes": [0, 0, 2],
+                "hook_scores": [0.91, 0.73, 0.52],
+                "overall_confidence": 0.82,
+                "reason": "invalid order"
+              }
+            """
+        )
+
+
+def test_parse_carousel_order_plan_rejects_non_descending_hook_scores() -> None:
+    with pytest.raises(FinalEditPlanningError, match="hook_scores"):
+        parse_carousel_order_plan(
+            """
+            {
+              "ordered_image_indexes": [0, 1, 2],
+              "hook_scores": [0.70, 0.91, 0.50],
+              "overall_confidence": 0.82,
+              "reason": "invalid hook score order"
+            }
+            """
+        )
+
+
+def test_parse_carousel_order_plan_rejects_non_numeric_confidence() -> None:
+    with pytest.raises(FinalEditPlanningError, match="overall_confidence"):
+        parse_carousel_order_plan(
+            """
+            {
+              "ordered_image_indexes": [0, 1, 2],
+              "hook_scores": [0.91, 0.73, 0.52],
+              "overall_confidence": "high",
+              "reason": "invalid confidence"
+            }
+            """
+        )
+
+
+def test_parse_final_edit_batch_plan_accepts_image_plans_and_carousel_order() -> None:
+    batch_plan = parse_final_edit_batch_plan(
+        """
+        {
+          "image_plans": [
+            {
+              "image_index": 0,
+              "content": "cake hero shot",
+              "strategy": "Keep the warm cafe mood and add a crisp nostalgic finish.",
+              "tools": ["denoise", "sharpen", "filter"],
+              "params": {
+                "denoise": {"strength": 0.35},
+                "sharpen": {"strength": 0.2},
+                "filter": {"filter_name": "Valencia"}
+              }
+            },
+            {
+              "image_index": 1,
+              "content": "texture close-up",
+              "strategy": "Crop tighter and keep the warm cafe finish consistent.",
+              "tools": ["crop", "filter"],
+              "params": {
+                "crop": {"subject_boxes": [[10, 10, 60, 100]], "keep_edges": []},
+                "filter": {"filter_name": "Valencia"}
+              }
+            },
+            {
+              "image_index": 2,
+              "content": "ambience shelf scene",
+              "strategy": "Use a gentle warm finish for consistency.",
+              "tools": ["filter"],
+              "params": {
+                "filter": {"filter_name": "Valencia"}
+              }
+            }
+          ],
+          "carousel_order": {
+            "ordered_image_indexes": [2, 0, 1],
+            "hook_scores": [0.91, 0.73, 0.52],
+            "overall_confidence": 0.82,
+            "reason": "The third image hooks best, the first is the second strongest hook, and the second is the weakest hook."
+          }
+        }
+        """,
+        image_count=3,
+        upscale_enabled=False,
+        owner_persona="friendly",
+    )
+
+    assert [plan.image_index for plan in batch_plan.image_plans] == [0, 1, 2]
+    assert batch_plan.carousel_order is not None
+    assert batch_plan.carousel_order.ordered_image_indexes == [2, 0, 1]
+    assert batch_plan.carousel_order.hook_scores == [0.91, 0.73, 0.52]
+
+
+def test_parse_final_edit_batch_plan_keeps_image_plans_when_only_carousel_order_is_invalid() -> None:
+    batch_plan = parse_final_edit_batch_plan(
+        """
+        {
+          "image_plans": [
+            {
+              "image_index": 0,
+              "content": "cake hero shot",
+              "strategy": "Keep the warm cafe mood.",
+              "tools": ["filter"],
+              "params": {"filter": {"filter_name": "Valencia"}}
+            }
+          ],
+          "carousel_order": {
+            "ordered_image_indexes": [0, 1, 2],
+            "hook_scores": [0.52, 0.91, 0.73],
+            "overall_confidence": 0.82,
+            "reason": "invalid hook score order"
+          }
+        }
+        """,
+        image_count=3,
+        upscale_enabled=False,
+        owner_persona="friendly",
+    )
+
+    assert [plan.image_index for plan in batch_plan.image_plans] == [0]
+    assert batch_plan.carousel_order is None
+    assert batch_plan.carousel_order_error_message == "hook_scores must be sorted from highest to lowest."
+
+
 @pytest.mark.asyncio
-async def test_final_edit_planner_client_builds_validated_plans() -> None:
+async def test_final_edit_planner_client_builds_validated_batch_plan() -> None:
     client = _planner_client()
     original = settings.FINAL_EDIT_ENABLE_UPSCALE
     settings.FINAL_EDIT_ENABLE_UPSCALE = True
 
     try:
         async def fake_request_plan(image_paths, context):
-            assert image_paths == ["a.jpg", "b.jpg"]
+            assert image_paths == ["a.jpg", "b.jpg", "c.jpg"]
             assert context.owner_persona == "friendly"
             assert context.caption == "dessert intro"
             return """
-            [
-              {
-                "image_index": 0,
-                "content": "signature cake on a cafe table",
-                "strategy": "The warm cafe mood and dessert subject fit Valencia best.",
-                "tools": ["filter"],
-                "params": {
-                  "filter": {"filter_name": "Valencia"}
+            {
+              "image_plans": [
+                {
+                  "image_index": 0,
+                  "content": "signature cake on a cafe table",
+                  "strategy": "Crop in on the cake, reduce low-light noise, sharpen lightly, and apply a warm cafe filter.",
+                  "tools": ["crop", "denoise", "sharpen", "filter"],
+                  "params": {
+                    "crop": {
+                      "subject_boxes": [[120, 80, 420, 520]],
+                      "keep_edges": []
+                    },
+                    "denoise": {"strength": 0.35},
+                    "sharpen": {"strength": 0.2},
+                    "filter": {"filter_name": "Valencia"}
+                  }
                 }
+              ],
+              "carousel_order": {
+                "ordered_image_indexes": [2, 0, 1],
+                "hook_scores": [0.88, 0.70, 0.49],
+                "overall_confidence": 0.78,
+                "reason": "The third image is the strongest hook, the first is the second strongest hook, and the second is the weakest hook."
               }
-            ]
+            }
             """
 
         client._request_plan = fake_request_plan  # type: ignore[method-assign]
 
-        plans = await client.build_plans(
-            ["a.jpg", "b.jpg"],
+        batch_plan = await client.build_batch_plan(
+            ["a.jpg", "b.jpg", "c.jpg"],
             FinalEditSessionContext(
                 owner_persona="friendly",
                 caption="dessert intro",
@@ -459,10 +1051,19 @@ async def test_final_edit_planner_client_builds_validated_plans() -> None:
     finally:
         settings.FINAL_EDIT_ENABLE_UPSCALE = original
 
-    assert len(plans) == 1
-    assert plans[0].image_index == 0
-    assert plans[0].tools == ["filter", "upscale"]
-    assert plans[0].params["filter"]["filter_name"] == "Valencia"
+    assert len(batch_plan.image_plans) == 1
+    assert batch_plan.image_plans[0].image_index == 0
+    assert batch_plan.image_plans[0].tools == ["crop", "denoise", "sharpen", "filter", "upscale"]
+    assert batch_plan.image_plans[0].params["crop"] == {
+        "subject_boxes": [[120, 80, 420, 520]],
+        "keep_edges": [],
+    }
+    assert batch_plan.image_plans[0].params["denoise"] == {"strength": 0.35}
+    assert batch_plan.image_plans[0].params["sharpen"] == {"strength": 0.2}
+    assert batch_plan.image_plans[0].params["filter"]["filter_name"] == "Valencia"
+    assert batch_plan.carousel_order is not None
+    assert batch_plan.carousel_order.ordered_image_indexes == [2, 0, 1]
+    assert batch_plan.carousel_order.hook_scores == [0.88, 0.70, 0.49]
 
 
 @pytest.mark.asyncio
@@ -471,23 +1072,26 @@ async def test_final_edit_planner_client_rejects_out_of_range_index() -> None:
 
     async def fake_request_plan(image_paths, context):
         return """
-        [
-          {
-            "image_index": 2,
-            "content": "store interior",
-            "strategy": "Soft clean mood fits Reyes.",
-            "tools": ["filter"],
-            "params": {
-              "filter": {"filter_name": "Reyes"}
+        {
+          "image_plans": [
+            {
+              "image_index": 2,
+              "content": "store interior",
+              "strategy": "Soft clean mood fits Reyes.",
+              "tools": ["filter"],
+              "params": {
+                "filter": {"filter_name": "Reyes"}
+              }
             }
-          }
-        ]
+          ],
+          "carousel_order": null
+        }
         """
 
     client._request_plan = fake_request_plan  # type: ignore[method-assign]
 
     with pytest.raises(FinalEditPlanningError, match="out-of-range"):
-        await client.build_plans(
+        await client.build_batch_plan(
             ["a.jpg", "b.jpg"],
             FinalEditSessionContext(caption="store intro", keywords=["interior"]),
         )

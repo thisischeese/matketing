@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Request
 import httpx
@@ -42,6 +42,10 @@ MAX_MENU_DESCRIPTION_CHARS = 320
 MAX_MENU_NAME_CHARS = 80
 MAX_KEYWORD_CHARS = 24
 MAX_MATCHED_KEYWORD_CHARS = 24
+MAX_REFERENCE_CAPTION_CHARS = 240
+
+ContextRoutingVariant = Literal["baseline", "selective"]
+ContextProfile = Literal["basic_context", "menu_context", "reference_context"]
 
 _DEFAULT_SYSTEM_INSTRUCTION = (
     "guide_text와 caption만 포함한 JSON 객체 하나만 반환하세요."
@@ -99,6 +103,51 @@ def build_caption_generation_dynamic_suffix(
         f"- menu_name: {menu_name}\n"
         f"- menu_description: {menu_description}\n"
     )
+
+
+def _build_selective_prompt_lines(
+    fields: list[tuple[str, str]],
+) -> str:
+    lines = ["?낅젰:"]
+    for key, value in fields:
+        normalized = value.strip()
+        if not normalized:
+            continue
+        lines.append(f"- {key}: {normalized}")
+    return "\n".join(lines) + "\n"
+
+
+def build_caption_generation_selective_suffix(
+    *,
+    owner_persona: str,
+    today: str,
+    weather_context: str,
+    utterance: str,
+    draft_keywords: str,
+    context_profile: ContextProfile,
+    matched_keyword: str = "",
+    menu_name: str = "",
+    menu_description: str = "",
+    reference_captions: str = "",
+) -> str:
+    fields: list[tuple[str, str]] = [
+        ("owner_persona", owner_persona),
+        ("today", today),
+        ("weather_context", weather_context),
+        ("utterance", utterance),
+        ("draft_keywords", draft_keywords),
+    ]
+    if context_profile == "menu_context":
+        fields.extend(
+            [
+                ("matched_keyword", matched_keyword),
+                ("menu_name", menu_name),
+                ("menu_description", menu_description),
+            ]
+        )
+    elif context_profile == "reference_context":
+        fields.append(("reference_captions", reference_captions))
+    return _build_selective_prompt_lines(fields)
 
 _PRIMARY_WEATHER_TAG_PRIORITY = (
     PRECIP_HEAVY_RAIN,
@@ -164,6 +213,10 @@ def _build_weather_context(weather_tags: list[str]) -> str:
     return ", ".join(_WEATHER_CONTEXT_BY_TAG[tag] for tag in selected_tags)
 
 
+def build_weather_context(weather_tags: list[str]) -> str:
+    return _build_weather_context(weather_tags)
+
+
 def _truncate_text(value: str, limit: int) -> str:
     text = value.strip()
     if len(text) <= limit:
@@ -192,15 +245,32 @@ class CaptionGenerationResult:
 
 
 @dataclass
+class CaptionPromptContext:
+    owner_persona: str
+    today: str
+    weather_context: str
+    utterance_summary: str
+    context_profile: ContextProfile = "basic_context"
+    draft_keywords: list[str] = field(default_factory=list)
+    matched_keyword: str | None = None
+    menu_name: str | None = None
+    menu_description: str | None = None
+    reference_captions: list[str] = field(default_factory=list)
+
+
+@dataclass
 class CaptionGenerationRequest:
     draft_keywords: list[str]
     owner_persona: str
+    context_routing_variant: ContextRoutingVariant = "baseline"
+    context_profile: ContextProfile = "basic_context"
     today: str = ""
     utterance: str = ""
     weather_tags: list[str] = field(default_factory=list)
     menu_name: str | None = None
     menu_description: str | None = None
     matched_keyword: str | None = None
+    prompt_context: CaptionPromptContext | None = None
 
 
 @dataclass
@@ -218,6 +288,14 @@ class CaptionPipeline:
         return self._compose_prompt(dynamic_suffix)
 
     def build_dynamic_suffix(self, request: CaptionGenerationRequest) -> str:
+        if request.context_routing_variant == "selective":
+            return self._build_selective_dynamic_suffix(request)
+        return self._build_baseline_dynamic_suffix(request)
+
+    def _build_baseline_dynamic_suffix(
+        self,
+        request: CaptionGenerationRequest,
+    ) -> str:
         owner_persona = request.owner_persona.strip() or "사장님 감성"
         today = request.today.strip() or "오늘"
         weather_context = _build_weather_context(request.weather_tags)
@@ -236,7 +314,7 @@ class CaptionPipeline:
             MAX_MENU_DESCRIPTION_CHARS,
         )
 
-        return self._shrink_prompt_if_needed(
+        return self._shrink_baseline_prompt_if_needed(
             request=request,
             owner_persona=owner_persona,
             today=today,
@@ -250,6 +328,38 @@ class CaptionPipeline:
 
     def _compose_prompt(self, dynamic_suffix: str) -> str:
         return f"{self.static_prefix}\n\n{dynamic_suffix}"
+
+    def _build_selective_dynamic_suffix(
+        self,
+        request: CaptionGenerationRequest,
+    ) -> str:
+        owner_persona = request.owner_persona.strip() or "owner persona"
+        today = request.today.strip() or "today"
+        weather_context = _build_weather_context(request.weather_tags)
+        utterance = _truncate_text(request.utterance.strip(), MAX_UTTERANCE_CHARS)
+        draft_keywords = self._format_keywords_without_placeholder(request.draft_keywords)
+        matched_keyword = _truncate_text(
+            request.matched_keyword or self._default_matched_keyword(request),
+            MAX_MATCHED_KEYWORD_CHARS,
+        )
+        menu_name = _truncate_text(request.menu_name or "", MAX_MENU_NAME_CHARS)
+        menu_description = _truncate_text(
+            request.menu_description or "",
+            MAX_MENU_DESCRIPTION_CHARS,
+        )
+        reference_captions = self._format_reference_captions(request)
+        return self._shrink_selective_prompt_if_needed(
+            request=request,
+            owner_persona=owner_persona,
+            today=today,
+            weather_context=weather_context,
+            draft_keywords=draft_keywords,
+            matched_keyword=matched_keyword,
+            menu_name=menu_name,
+            menu_description=menu_description,
+            utterance=utterance,
+            reference_captions=reference_captions,
+        )
 
     def build_fallback(
         self,
@@ -274,7 +384,7 @@ class CaptionPipeline:
             fallback_source=effective_fallback_source,
         )
 
-    def _shrink_prompt_if_needed(
+    def _shrink_baseline_prompt_if_needed(
         self,
         *,
         request: CaptionGenerationRequest,
@@ -361,6 +471,104 @@ class CaptionPipeline:
         ]
         return ", ".join(normalized[:3]) if normalized else "(없음)"
 
+    def _shrink_selective_prompt_if_needed(
+        self,
+        *,
+        request: CaptionGenerationRequest,
+        owner_persona: str,
+        today: str,
+        weather_context: str,
+        draft_keywords: str,
+        matched_keyword: str,
+        menu_name: str,
+        menu_description: str,
+        utterance: str,
+        reference_captions: str,
+    ) -> str:
+        current_description = menu_description
+        current_reference_captions = reference_captions
+        current_utterance = utterance
+        current_dynamic_suffix = build_caption_generation_selective_suffix(
+            owner_persona=owner_persona,
+            today=today,
+            weather_context=weather_context,
+            utterance=current_utterance,
+            draft_keywords=draft_keywords,
+            context_profile=request.context_profile,
+            matched_keyword=matched_keyword,
+            menu_name=menu_name,
+            menu_description=current_description,
+            reference_captions=current_reference_captions,
+        )
+        current_prompt = self._compose_prompt(current_dynamic_suffix)
+        if len(current_prompt) <= MAX_PROMPT_CHARS:
+            return current_dynamic_suffix
+
+        current_description = _truncate_text(
+            current_description,
+            min(160, len(current_description)),
+        )
+        current_reference_captions = _truncate_text(
+            current_reference_captions,
+            min(160, len(current_reference_captions)),
+        )
+        current_dynamic_suffix = build_caption_generation_selective_suffix(
+            owner_persona=owner_persona,
+            today=today,
+            weather_context=weather_context,
+            utterance=current_utterance,
+            draft_keywords=draft_keywords,
+            context_profile=request.context_profile,
+            matched_keyword=matched_keyword,
+            menu_name=menu_name,
+            menu_description=current_description,
+            reference_captions=current_reference_captions,
+        )
+        current_prompt = self._compose_prompt(current_dynamic_suffix)
+        if len(current_prompt) <= MAX_PROMPT_CHARS:
+            return current_dynamic_suffix
+
+        current_utterance = _truncate_text(
+            current_utterance,
+            min(160, len(current_utterance)),
+        )
+        compact_keywords = self._format_keywords_without_placeholder(
+            request.draft_keywords[:2]
+        )
+        return build_caption_generation_selective_suffix(
+            owner_persona=owner_persona,
+            today=today,
+            weather_context=weather_context,
+            utterance=current_utterance,
+            draft_keywords=compact_keywords,
+            context_profile=request.context_profile,
+            matched_keyword=matched_keyword,
+            menu_name=menu_name,
+            menu_description=_truncate_text(current_description, 120),
+            reference_captions=_truncate_text(current_reference_captions, 120),
+        )
+
+    @staticmethod
+    def _format_keywords_without_placeholder(keywords: list[str]) -> str:
+        normalized = [
+            _truncate_text(keyword.strip(), MAX_KEYWORD_CHARS)
+            for keyword in keywords
+            if keyword.strip()
+        ]
+        return ", ".join(normalized[:3])
+
+    @staticmethod
+    def _format_reference_captions(request: CaptionGenerationRequest) -> str:
+        prompt_context = request.prompt_context
+        if prompt_context is None:
+            return ""
+        normalized = [
+            _truncate_text(caption.strip(), MAX_REFERENCE_CAPTION_CHARS)
+            for caption in prompt_context.reference_captions[:2]
+            if caption.strip()
+        ]
+        return " | ".join(normalized)
+
     @staticmethod
     def _default_matched_keyword(request: CaptionGenerationRequest) -> str:
         return next((keyword for keyword in request.draft_keywords if keyword.strip()), "")
@@ -380,6 +588,10 @@ class CaptionPipeline:
 
 def _build_menu_promotion_pipeline() -> CaptionPipeline:
     return CaptionPipeline(build_caption_generation_static_prefix())
+
+
+def estimate_prompt_char_count(request: CaptionGenerationRequest) -> int:
+    return len(_build_menu_promotion_pipeline().build_prompt(request))
 
 
 class CaptionGenerationService:

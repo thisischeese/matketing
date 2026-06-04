@@ -75,3 +75,9 @@ ai/models/
 ai/mock_agent.py
 ai/analysis
 
+*.gguf
+*.md
+*.safetensors
+*.pt
+*.pth
+*.h5
